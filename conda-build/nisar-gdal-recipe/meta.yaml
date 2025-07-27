@@ -1,0 +1,41 @@
+{% set name = "gdal-driver-nisar" %}
+{% set version = "0.1.0" %} # This is the version of NISAR PLUGIN
+
+package:
+  name: {{ name|lower }}
+  version: {{ version }}
+
+source:
+  # Build from the current directory
+  path: .
+
+requirements:
+  build:
+    - {{ compiler('cxx') }}
+    - cmake
+    - make
+
+  host:
+    # Key dependencies to build against
+    - libgdal-core
+    - hdf5
+
+  run:
+    # Key dependencies to run with
+    - libgdal-core
+    - hdf5
+
+test:
+  # Add this section to install a full GDAL environment for testing.
+  requirements:
+    - gdal      # Provides the gdalinfo command-line tool
+    - libgdal   # Metapackage that installs all standard driver plugins
+
+  commands:
+    # This command will now run in the complete environment.
+    - gdalinfo --formats | grep NISAR
+
+about:
+  home: # add project's home URL
+  license: # add project's license
+  summary: 'A GDAL plugin to read NISAR HDF5 files.'
