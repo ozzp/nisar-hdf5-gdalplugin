@@ -18,74 +18,9 @@ The build process relies on the following key files in the project directory.
 
 ### `meta.yaml`
 
-This file defines the package metadata and dependencies.
-
-```yaml
-{% set name = "gdal-driver-nisar" %}
-{% set version = "0.1.0" %}
-
-package:
-  name: {{ name|lower }}
-  version: {{ version }}
-
-source:
-  path: .
-
-build:
-  number: 0
-
-requirements:
-  build:
-    - {{ compiler('cxx') }}
-    - cmake
-    - make
-
-  host:
-    - libgdal
-    - hdf5
-
-  run:
-    - libgdal
-    - hdf5
-
-test:
-  requirements:
-    - gdal
-    - libgdal
-  commands:
-    # Test that the driver is registered with GDAL
-    - gdalinfo --formats | grep NISAR
-
-about:
-  home: # https://github.com/ozzp/nisar-hdf5-gdalplugin/
-  license: # Apache-2.0
-  summary: 'A GDAL plugin to read NISAR HDF5 files.'
-````
-
 ### `build.sh`
 
 This script compiles the C++ plugin. It is cross-platform and does not need to be changed.
-
-```bash
-#!/bin/bash
-
-set -ex # Exit on error and print commands
-
-mkdir build
-cd build
-
-# Configure the build.
-cmake .. \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX=$PREFIX \
-    -DCMAKE_PREFIX_PATH=$PREFIX
-
-# Compile the plugin
-make -j${CPU_COUNT}
-
-# Install the plugin
-make install
-```
 
 -----
 
