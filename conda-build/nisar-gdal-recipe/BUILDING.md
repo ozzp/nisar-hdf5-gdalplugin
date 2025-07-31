@@ -143,8 +143,6 @@ CMD ["/bin/bash"]
 
 ## Building for macOS (Native)
 
-Building for native `osx-arm64` architecture is straightforward.
-
 1.  Open terminal in the project directory.
 2.  Run the `conda build` command:
     ```bash
