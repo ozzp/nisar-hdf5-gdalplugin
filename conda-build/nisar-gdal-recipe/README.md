@@ -1,6 +1,6 @@
 # GDAL Plugin for NISAR HDF5
 
-A read-only GDAL driver for NISAR L-band and S-band HDF5 products, with a focus on supporting efficient, cloud-optimized data access.
+A read-only GDAL driver for NISAR L-band and S-band(soon) HDF5 products, with a focus on supporting efficient, cloud-optimized data access.
 
 ## Features
 
@@ -16,13 +16,11 @@ A read-only GDAL driver for NISAR L-band and S-band HDF5 products, with a focus 
 
 ## Installation
 
-The recommended way to install this plugin is via the conda package manager from the `<your-channel-name>` channel on Anaconda.org.
+The recommended way to install this plugin is via the conda package manager from the `nisar-forge` channel on Anaconda.org.
 
 ```shell
-conda install -c <your-channel-name> gdal-driver-nisar
+conda install -c nisar-forge gdal-driver-nisar
 ```
-
-*(Note: Replace `<your-channel-name>` with the name of your Anaconda channel once the packages are uploaded.)*
 
 -----
 
@@ -42,25 +40,25 @@ export AWS_SESSION_TOKEN="<your-session-token>"
 
 ### Sample Commands
 
-Replace `<your-nisar-file.h5>` with the path to your local file or an S3 URL (`s3://...`).
+Replace `<NISAR-XXXXXX-file.h5>` with the path to your local file or an S3 URL (`s3://...`).
 
   * **Get info for all subdatasets:**
 
     ```shell
-    gdalinfo NISAR:<your-nisar-file.h5>
+    gdalinfo NISAR:<NISAR-XXXXXX-file.h5>
     ```
 
   * **Get info for a specific subdataset:**
 
     ```shell
     # Opens the HH polarization dataset for frequency A
-    gdalinfo 'NISAR:<your-nisar-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH'
+    gdalinfo 'NISAR:<NISAR-XXXXXX-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH'
     ```
 
   * **Convert a specific subdataset to GeoTIFF:**
 
     ```shell
-    gdal_translate -of GTiff 'NISAR:<your-nisar-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH' output_HH.tif
+    gdal_translate -of GTiff 'NISAR:<NISAR-XXXXXX-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH' output_HH.tif
     ```
 
 -----
@@ -71,7 +69,7 @@ If you need to build the plugin from the latest source code, the recommended met
 
 ### Building with Conda (Recommended)
 
-Detailed, platform-specific instructions for creating the conda packages for both `osx-arm64` and `linux-64` are available in **[BUILDING.md])**. This is the preferred method as it handles all dependencies automatically.
+Platform-specific instructions for creating the conda packages for both `osx-arm64` and `linux-64` are available in **[BUILDING.md])**. This is the preferred method as it handles all dependencies automatically.
 
 ### Manual Build (Advanced)
 
