@@ -24,7 +24,7 @@ For accessing files in S3, the driver uses the HDF5 ROS3 VFD, which requires AWS
 export AWS_REGION="<your-region>"
 export AWS_ACCESS_KEY_ID="<your-key-id>"
 export AWS_SECRET_ACCESS_KEY="<your-secret-key>"
-# AWS_SESSION_TOKEN is also supported if you are using temporary credentials
+export AWS_SESSION_TOKEN="<your-secret-key>"
 ```
 
 ### Sample Commands
