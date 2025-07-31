@@ -1,5 +1,3 @@
-### `BUILDING.md`
-
 # Building the GDAL NISAR Plugin
 
 This document provides instructions for building the `gdal-driver-nisar` conda package for two target platforms:
