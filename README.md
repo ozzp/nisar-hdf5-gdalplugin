@@ -1,78 +1,147 @@
-# nisar-hdf5-gdalplugin
-Development of NISAR HDF5 GDAL plugin
-# GDAL Plugin for NISAR HDF5 with Cloud-Optimized Access
+# GDAL Plugin for NISAR HDF5
 
-Development of a read-only GDAL plugin for NISAR HDF5 data, with a focus on supporting efficient cloud-optimized access.
+A read-only GDAL driver for NISAR L-band and S-band(soon) HDF5 products, with a focus on supporting efficient, cloud-optimized data access.
 
-## GDAL Driver
+## Features
 
-* **Inheritance:** Inherit from the `GDALDriver` class to handle interaction between GDAL and HDF5 files.
-* **Implementation:** Implement as a loadable module for dynamic loading of shared libraries.
-* **File Identification:**  Implement logic to identify NISAR HDF5 files. Consider building a dependence on the Standard Product File Naming Scheme.
-* **HDF5 Parsing:** Parse HDF5 structure and metadata to identify relevant raster datasets.
-* **Partial Reads:** Enable efficient partial reads of data in chunks aligned with defined chunk sizes for optimized cloud access.
-* **Metadata Handling:**
-    * Extract georeferencing, projections, and other metadata from the HDF5 file.
-    * Expose this metadata through the GDAL API.
-    * Enable the creation of new metadata and writing to the output format.
-* **HTTP Range Requests:** Leverage HTTP GET Range Requests to read and download specific chunks from remote object stores.
-* **Overviews:** Support the reading of resampled datasets (overviews).
-* **Parallelization:** Explore potential parallelization for reading chunks/pages.
-* **GDAL Registration:** Register the new driver with GDAL to enable its use with GDAL utilities (`gdalinfo`, `gdal_translate`, `gdalwarp`, `gdaladdo`, etc.).
+  * **Dynamic Loading:** Implemented as a loadable shared library that GDAL can discover at runtime.
+  * **NISAR Product Identification:** Automatically identifies NISAR HDF5 files based on their internal structure and metadata.
+  * **Subdataset Discovery:** Parses HDF5 structure to find and expose relevant raster datasets under `/science/LSAR/`.
+  * **Cloud-Optimized Access:** Leverages the HDF5 ROS3 VFD (Read-Only S3 Virtual File Driver) to efficiently read data directly from cloud object stores.
+  * **Metadata Handling:** Extracts and exposes georeferencing (EPSG/WKT), projections, and other metadata through the GDAL API.
+  * **Overview Support:** (TBD) Support for reading resampled datasets.
+  * **GDAL Integration:** Fully registered with the GDAL framework, enabling use with standard utilities like `gdalinfo`, `gdal_translate`, and `gdalwarp`.
 
-## HDF5 Library
+-----
 
-* Utilize the HDF5 library (`libhdf5`) for low-level access and manipulation of HDF5 files.
-* Refer to the HDF5 documentation for details on reading datasets: [https://support.hdfgroup.org/archive/support/HDF5/doc/RM/RM_H5D.html#Dataset-Read](https://support.hdfgroup.org/archive/support/HDF5/doc/RM/RM_H5D.html#Dataset-Read)
-* Make sure to install openssl-devel, curl
-* ./configure --prefix=/usr/local/hdf5 --enable-cxx --enable-build-mode=debug --enable-internal-debug=all --enable-trace --enable-profiling --enable-ros3-vfd
-* Make sure (Read-Only) S3 VFD: yes
-* h5cc -showconfig (To check Configuration post install)
-* g++ -o test test.cpp -I/usr/local/hdf5/include -L/usr/local/hdf5/lib -lhdf5 -lhdf5_cpp  (Make sure to set LD_LIBRARY_PATH)
+## Installation
 
-## Driver Implementation Details
+The recommended way to install this plugin is via the conda package manager from the `nisar-forge` channel on Anaconda.org.
 
-* **GDALDataset Subclass(NisarDataset):** A subclass of `GDALDataset` that represents the NISAR HDF5 dataset. It supports opening files from both local storage and AWS S3 (using the HDF5 ROS3 VFD with authentication via environment variables and a two-pass open strategy to optimize page buffering for S3 access). The driver can parse connection strings to open specific HDF5 datasets within the file; if no specific path is given, it performs subdataset discovery by iterating through the HDF5 structure to find and list relevant raster datasets (under /science/LSAR/). When a specific or default dataset is opened, the driver determines its raster properties (dimensions, data type, band count), creates corresponding raster bands, and attempts to set an optimized HDF5 chunk cache. It provides georeferencing information by reading the epsg_code or WKT from a projection dataset and calculating the GeoTransform from coordinate and spacing datasets. Metadata is handled for different domains: the default domain includes attributes from the opened dataset and related coordinate/projection datasets, and a custom "NISAR_GLOBAL" domain reads attributes from the root group. The driver also implements caching for spatial reference and metadata to improve performance on repeated calls.
-* **GDALRasterBand Subclass(NisarRasterBand):** A subclass of `GDALRasterBand` that represents raster bands within the dataset.  The NisarRasterBand class, inheriting from GDALPamRasterBand, represents a single band of a NISAR HDF5 raster dataset. Its constructor initializes band-specific properties like the GDAL data type (derived from the parent dataset), the block size (typically set to match the HDF5 dataset's chunk dimensions for efficient I/O), and stores a copy of the HDF5 native data type for use in read operations. The core functionality lies in the overridden IReadBlock method, which calculates the appropriate HDF5 hyperslab (offset and count) corresponding to GDAL's block request, reads the actual pixel data from the associated HDF5 dataset using H5Dread, and correctly handles partial blocks at the raster edges by padding the GDAL-provided buffer with zeros. It also includes a GetMetadata method to read attributes directly attached to its HDF5 dataset and populate the band's default metadata domain, integrating with the PAM system.
-* **Driver Registration:** The NISAR GDAL driver is registered through a dedicated function, GDALRegister_NISAR(), which is automatically invoked when GDAL loads the driver plugin. Inside this function, a new GDALDriver object is created and configured with descriptive metadata, its short name ("NISAR"), a longer descriptive name, the common file extension ("h5"), and a help topic path. The static NisarDataset::Open method is assigned to the pfnOpen function pointer of the GDALDriver object, enabling GDAL to call this method when a user attempts to open a file using the "NISAR:" prefix or when GDAL identifies a file as a NISAR product. Finally, this configured GDALDriver object is registered with the global GDAL driver manager, making the NISAR driver available for use within the GDAL.
-* **Georeferencing:** Implemented for L2 datasets that support it.
-* **Overviews:** TBD: Implement overview support.
+```shell
+conda install -c nisar-forge gdal-driver-nisar
+```
 
-## AWS Authentication
-* ** AWS Credentials specified as environmental variables: AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+-----
 
-## GDAL Command Line Interface
+## Usage
 
-* **Metadata** Determine what metadata from input source to have in output's Label.  Determine what metadata to create for output's Label.
+### AWS Authentication
 
-## GDAL Sample Commands
-* **(Get info for all datasets)** gdalinfo NISAR:NISAR_L2_PR_GSLC_001_030_A_019_2000_SHNA_A_20081012T060910_20081012T060926_D00402_N_F_J_001.h5
-* **(Get info for specific subdataset)** gdalinfo NISAR:NISAR_L2_PR_GSLC_001_030_A_019_2000_SHNA_A_20081012T060910_20081012T060926_D00402_N_F_J_001.h5 -co OPTIONS="BAND=S DATASET=HHHH MASK=ON"
-* **(Convert specific subdataset to GTIFF)** gdal_translate -of GTiff NISAR:NISAR_L2_PR_GSLC_001_030_A_019_2000_SHNA_A_20081012T060910_20081012T060926_D00402_N_F_J_001.h5 -co OPTIONS="FREQ=A DATASET=HH MASK=ON" output_name.tif
-* **(Reproject single Subdataset)** gdalwarp -of GTiff -t_srs EPSG:4326 -co OPTIONS="BAND=S DATASET=HHHH MASK=ON" NISAR:NISAR_L2_PR_GSLC_001_030_A_019_2000_SHNA_A_20081012T060910_20081012T060926_D00402_N_F_J_001.h5 output_name.tif
-* **(Reproject multiple/all H5 Datasets)** gdalwarp -of GTiff -t_srs EPSG:4326 -co OPTIONS="BAND=ALL DATASET=ALL MASK=ANY" NISAR:NISAR_L2_PR_GSLC_001_030_A_019_2000_SHNA_A_20081012T060910_20081012T060926_D00402_N_F_J_001.h5
-* **(Clip to a Geographic Extent)** gdalwarp -of GTiff -te xmin ymin xmax ymax -co OPTIONS="BAND=S DATASET=HHHH MASK=ON" NISAR:NISAR_L2_PR_GSLC_001_030_A_019_2000_SHNA_A_20081012T060910_20081012T060926_D00402_N_F_J_001.h5 output.tif
-* **(Multiband GeoTIFF)**
-* **(Overviews)** gdaladdo
-  
-## Product Implementation Priority
+For accessing files in S3, the driver requires AWS credentials. Please export the following environment variables:
 
-Prioritize implementing support for the following products:
+```shell
+export AWS_REGION="<your-region>"
+export AWS_ACCESS_KEY_ID="<your-key-id>"
+export AWS_SECRET_ACCESS_KEY="<your-secret-key>"
+# If using temporary credentials, also set:
+export AWS_SESSION_TOKEN="<your-session-token>"
+```
 
-* L2 GCOV: Example: create Georeferenced longitute-latitude color contour plot using rtcGammaToSigmaFactor raster.  
-* L2 GSLC: Example: convert single-band Complex32 dataset into two-band Float32 GTIFF of Amplitude and Phase.
-* L2 GOFF:
+### Sample Commands
 
-## Visualization and Validation
-* QGIS
+Replace `<NISAR-XXXXXX-file.h5>` with the path to your local file or an S3 URL (`s3://...`).
 
-## Existing Code Examples
+  * **Get info for all subdatasets:**
 
-* Mike Smyth's code for the VICAR GDAL plugin:
-    *  [https://github.com/Cartography-jpl/vicar-gdalplugin](https://github.com/Cartography-jpl/vicar-gdalplugin)
-* Michael's code for NISAR data readers:
-    *  [https://github.com/aivazis/qed/tree/main/pkg/readers/nisar](https://github.com/aivazis/qed/tree/main/pkg/readers/nisar)
-    *  [https://github.com/aivazis/qed](https://github.com/aivazis/qed)
-    *  [https://github.com/pyre/pyre](https://github.com/pyre/pyre)
- 
-    *  https://www.hdfeos.org/software/gdal.php
+    ```shell
+    gdalinfo NISAR:<NISAR-XXXXXX-file.h5>
+    ```
+
+  * **Get info for a specific subdataset:**
+
+    ```shell
+    # Opens the HH polarization dataset for frequency A
+    gdalinfo 'NISAR:<NISAR-XXXXXX-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH'
+    ```
+
+  * **Convert a specific subdataset to GeoTIFF:**
+
+    ```shell
+    gdal_translate -of GTiff 'NISAR:<NISAR-XXXXXX-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH' output_HH.tif
+    ```
+
+-----
+
+## Building from Source
+
+If you need to build the plugin from the latest source code, the recommended method is to build the conda package yourself.
+
+### Building with Conda (Recommended)
+
+Platform-specific instructions for creating the conda packages for both `osx-arm64` and `linux-64` are available in **[BUILDING.md])**. This is the preferred method as it handles all dependencies automatically.
+
+### Manual Build (Advanced)
+
+\<details\>
+\<summary\>Click for advanced instructions on building dependencies manually.\</summary\>
+
+Building the plugin manually requires first compiling a compatible HDF5 library with ROS3 VFD support.
+
+**1. Build HDF5 Library:**
+
+  * **Prerequisites:**
+
+    ```shell
+    # On Red Hat / AlmaLinux
+    sudo dnf install openssl-devel libcurl-devel
+    ```
+
+  * **Configure and Compile:**
+
+    ```shell
+    # Download and extract HDF5 source
+    ./configure --prefix=/usr/local/hdf5 \
+                --enable-cxx \
+                --enable-ros3-vfd
+
+    make && sudo make install
+    ```
+
+    *Verify the ROS3 VFD is enabled by running `h5cc -showconfig` and checking for `(Read-Only) S3 VFD: yes`.*
+
+**2. Build the Plugin:**
+
+Once HDF5 is installed, you can compile the plugin using CMake.
+
+```shell
+mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/path/to/install
+make && make install
+```
+
+\</details\>
+
+-----
+
+## C++ Implementation Details
+
+\<details\>
+\<summary\>Click to expand developer notes on the driver's C++ class structure.\</summary\>
+
+  * **`NisarDataset` (subclass of `GDALDataset`):** Represents the NISAR HDF5 dataset. It supports opening files from both local storage and AWS S3 (using the HDF5 ROS3 VFD). The driver can parse connection strings to open specific HDF5 datasets within the file; if no specific path is given, it performs subdataset discovery by iterating through the HDF5 structure to find and list relevant raster datasets (under `/science/LSAR/`). When a dataset is opened, the driver determines its raster properties (dimensions, data type, band count), creates corresponding raster bands, and attempts to set an optimized HDF5 chunk cache. It provides georeferencing information by reading the `epsg_code` or WKT from a projection dataset and calculating the GeoTransform from coordinate datasets. Metadata is handled for a default domain (attributes from the opened HDF5 dataset) and a custom `"NISAR_GLOBAL"` domain (attributes from the root group).
+
+  * **`NisarRasterBand` (subclass of `GDALRasterBand`):** Represents a single raster band within the dataset. Its constructor initializes properties like the GDAL data type and block size (matched to the HDF5 chunk size for efficiency). The core functionality lies in the overridden `IReadBlock` method, which calculates the appropriate HDF5 hyperslab corresponding to GDAL's block request, reads the pixel data using `H5Dread`, and correctly handles partial blocks at raster edges by padding the buffer.
+
+  * **Driver Registration:** The driver is registered via `GDALRegister_NISAR()`, which is invoked when GDAL loads the plugin. This function creates and configures a `GDALDriver` object, assigning the static `NisarDataset::Open` method to the `pfnOpen` function pointer. This makes the driver available for use within the GDAL ecosystem.
+
+\</details\>
+
+-----
+
+## Visualization & Validation
+
+The compiled plugin allows NISAR HDF5 files to be opened directly in any GDAL-compatible software, such as **QGIS**, for visualization and analysis.
+
+## Data & Specifications
+
+  * **NISAR Sample Data & Product Specs:** [https://science.nasa.gov/mission/nisar/sample-data/](https://science.nasa.gov/mission/nisar/sample-data/)
+
+## Related Projects & References
+
+  * **VICAR GDAL Plugin:** [https://github.com/Cartography-jpl/vicar-gdalplugin](https://github.com/Cartography-jpl/vicar-gdalplugin)
+  * **HDF-EOS Information:** [https://www.hdfeos.org/software/gdal.php](https://www.hdfeos.org/software/gdal.php)
+  * **NISAR Data Reader Examples (by Michael Aivazis):**
+      * [https://github.com/aivazis/qed/tree/main/pkg/readers/nisar](https://github.com/aivazis/qed/tree/main/pkg/readers/nisar)
+      * [https://github.com/aivazis/qed](https://github.com/aivazis/qed)
+      * [https://github.com/pyre/pyre](https://github.com/pyre/pyre)
