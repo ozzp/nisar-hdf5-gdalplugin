@@ -1,16 +1,28 @@
 # GDAL Plugin for NISAR HDF5
 
-A read-only GDAL driver for NISAR L-band and S-band(soon) HDF5 products, with a focus on supporting efficient, cloud-optimized data access.
+A read-only GDAL driver for NISAR L-band and S-band HDF5 products, with a focus on supporting efficient, cloud-optimized data access.
 
 ## Features
 
   * **Dynamic Loading:** Implemented as a loadable shared library that GDAL can discover at runtime.
   * **NISAR Product Identification:** Automatically identifies NISAR HDF5 files based on their internal structure and metadata.
   * **Subdataset Discovery:** Parses HDF5 structure to find and expose relevant raster datasets under `/science/LSAR/`.
-  * **Cloud-Optimized Access:** Leverages the HDF5 ROS3 VFD (Read-Only S3 Virtual File Driver) to efficiently read data directly from cloud object stores using HTTP Range Requests.
+  * **Cloud-Optimized Access:** Leverages the HDF5 ROS3 VFD (Read-Only S3 Virtual File Driver) to efficiently read data directly from cloud object stores.
   * **Metadata Handling:** Extracts and exposes georeferencing (EPSG/WKT), projections, and other metadata through the GDAL API.
-  * **Overview Support:** (TBD) Support for reading resampled datasets (overviews).
+  * **Overview Support:** (TBD) Support for reading resampled datasets.
   * **GDAL Integration:** Fully registered with the GDAL framework, enabling use with standard utilities like `gdalinfo`, `gdal_translate`, and `gdalwarp`.
+
+-----
+
+## Installation
+
+The recommended way to install this plugin is via the conda package manager from the `<your-channel-name>` channel on Anaconda.org.
+
+```shell
+conda install -c <your-channel-name> gdal-driver-nisar
+```
+
+*(Note: Replace `<your-channel-name>` with the name of your Anaconda channel once the packages are uploaded.)*
 
 -----
 
@@ -18,55 +30,55 @@ A read-only GDAL driver for NISAR L-band and S-band(soon) HDF5 products, with a 
 
 ### AWS Authentication
 
-For accessing files in S3, the driver uses the HDF5 ROS3 VFD, which requires AWS credentials. Please export the following environment variables:
+For accessing files in S3, the driver requires AWS credentials. Please export the following environment variables:
 
 ```shell
 export AWS_REGION="<your-region>"
 export AWS_ACCESS_KEY_ID="<your-key-id>"
 export AWS_SECRET_ACCESS_KEY="<your-secret-key>"
-export AWS_SESSION_TOKEN="<your-secret-key>"
+# If using temporary credentials, also set:
+export AWS_SESSION_TOKEN="<your-session-token>"
 ```
 
 ### Sample Commands
 
-Replace `<NISAR_L2_XX_XXXX_XXX_XXX_X_XXX_XXXX_XXXX_X_XXXXXXXXXXXXXXX_XXXXXXXXXXXXXXX_XXXXXX_X_X_X_XXX.h5>` with the path to your local or S3 object URL.
+Replace `<your-nisar-file.h5>` with the path to your local file or an S3 URL (`s3://...`).
 
   * **Get info for all subdatasets:**
 
     ```shell
-    gdalinfo NISAR:NISAR_L2_XX_XXXX_XXX_XXX_X_XXX_XXXX_XXXX_X_XXXXXXXXXXXXXXX_XXXXXXXXXXXXXXX_XXXXXX_X_X_X_XXX.h5
+    gdalinfo NISAR:<your-nisar-file.h5>
     ```
 
   * **Get info for a specific subdataset:**
 
     ```shell
     # Opens the HH polarization dataset for frequency A
-    gdalinfo 'NISAR:NISAR_L2_XX_XXXX_XXX_XXX_X_XXX_XXXX_XXXX_X_XXXXXXXXXXXXXXX_XXXXXXXXXXXXXXX_XXXXXX_X_X_X_XXX.h5:/science/LSAR/GSLC/swaths/frequencyA/HH'
+    gdalinfo 'NISAR:<your-nisar-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH'
     ```
 
   * **Convert a specific subdataset to GeoTIFF:**
 
     ```shell
-    gdal_translate -of GTiff 'NISAR:NISAR_L2_XX_XXXX_XXX_XXX_X_XXX_XXXX_XXXX_X_XXXXXXXXXXXXXXX_XXXXXXXXXXXXXXX_XXXXXX_X_X_X_XXX.h5:/science/LSAR/GSLC/swaths/frequencyA/HH' output_HH.tif
-    ```
-
-  * **Reproject a single subdataset:**
-
-    ```shell
-    gdalwarp -t_srs EPSG:4326 'NISAR:NISAR_L2_XX_XXXX_XXX_XXX_X_XXX_XXXX_XXXX_X_XXXXXXXXXXXXXXX_XXXXXXXXXXXXXXX_XXXXXX_X_X_X_XXX.h5:/science/LSAR/GSLC/swaths/frequencyA/HV' output_HV_wgs84.tif
-    ```
-
-  * **Clip a subdataset to a geographic extent:**
-
-    ```shell
-    gdalwarp -te <xmin> <ymin> <xmax> <ymax> 'NISAR:NISAR_L2_XX_XXXX_XXX_XXX_X_XXX_XXXX_XXXX_X_XXXXXXXXXXXXXXX_XXXXXXXXXXXXXXX_XXXXXX_X_X_X_XXX.h5:/science/LSAR/GSLC/swaths/frequencyA/HH' output_clipped.tif
+    gdal_translate -of GTiff 'NISAR:<your-nisar-file.h5>:/science/LSAR/GSLC/swaths/frequencyA/HH' output_HH.tif
     ```
 
 -----
 
 ## Building from Source
 
-To build the plugin, you must first have a compatible HDF5 library compiled with ROS3 VFD support.
+If you need to build the plugin from the latest source code, the recommended method is to build the conda package yourself.
+
+### Building with Conda (Recommended)
+
+Detailed, platform-specific instructions for creating the conda packages for both `osx-arm64` and `linux-64` are available in **[BUILDING.md])**. This is the preferred method as it handles all dependencies automatically.
+
+### Manual Build (Advanced)
+
+\<details\>
+\<summary\>Click for advanced instructions on building dependencies manually.\</summary\>
+
+Building the plugin manually requires first compiling a compatible HDF5 library with ROS3 VFD support.
 
 **1. Build HDF5 Library:**
 
@@ -92,7 +104,15 @@ To build the plugin, you must first have a compatible HDF5 library compiled with
 
 **2. Build the Plugin:**
 
-Please follow the instructions in **[BUILDING.md]** to build the conda package for your target platform.
+Once HDF5 is installed, you can compile the plugin using CMake.
+
+```shell
+mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/path/to/install
+make && make install
+```
+
+\</details\>
 
 -----
 
@@ -115,9 +135,15 @@ Please follow the instructions in **[BUILDING.md]** to build the conda package f
 
 The compiled plugin allows NISAR HDF5 files to be opened directly in any GDAL-compatible software, such as **QGIS**, for visualization and analysis.
 
+## Data & Specifications
+
+  * **NISAR Sample Data & Product Specs:** [https://science.nasa.gov/mission/nisar/sample-data/](https://science.nasa.gov/mission/nisar/sample-data/)
+
 ## Related Projects & References
 
   * **VICAR GDAL Plugin:** [https://github.com/Cartography-jpl/vicar-gdalplugin](https://github.com/Cartography-jpl/vicar-gdalplugin)
   * **HDF-EOS Information:** [https://www.hdfeos.org/software/gdal.php](https://www.hdfeos.org/software/gdal.php)
-
------
+  * **NISAR Data Reader Examples (by Michael Aivazis):**
+      * [https://github.com/aivazis/qed/tree/main/pkg/readers/nisar](https://github.com/aivazis/qed/tree/main/pkg/readers/nisar)
+      * [https://github.com/aivazis/qed](https://github.com/aivazis/qed)
+      * [https://github.com/pyre/pyre](https://github.com/pyre/pyre)
