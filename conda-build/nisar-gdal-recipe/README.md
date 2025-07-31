@@ -2,7 +2,7 @@
 
 A read-only GDAL driver for NISAR L-band and S-band(soon) HDF5 products, with a focus on supporting efficient, cloud-optimized data access.
 
-## ✨ Features
+## Features
 
   * **Dynamic Loading:** Implemented as a loadable shared library that GDAL can discover at runtime.
   * **NISAR Product Identification:** Automatically identifies NISAR HDF5 files based on their internal structure and metadata.
