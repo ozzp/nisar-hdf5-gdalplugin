@@ -146,8 +146,15 @@ CMD ["/bin/bash"]
 1.  Open terminal in the project directory.
 2.  Run the `conda build` command:
     ```bash
-    conda build . --output-folder ./conda-bld
+    (unset CFLAGS; unset LDFLAGS; unset CXXFLAGS; unset CPPFLAGS; conda build . --output-folder ./conda-bld)
     ```
+This command will:
+1. Start a temporary subshell (.
+2. Unset the common build-related environment variables for that subshell only.
+3. Run the conda build command in that clean environment.
+4. Exit the subshell ), restoring original environment variables.
+
+This will force the compiler to use only the headers and libraries within the conda environment
 
 -----
 
