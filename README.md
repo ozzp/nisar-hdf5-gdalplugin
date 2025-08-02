@@ -73,9 +73,6 @@ Platform-specific instructions for creating the conda packages for both `osx-arm
 
 ### Manual Build (Advanced)
 
-\<details\>
-\<summary\>Click for advanced instructions on building dependencies manually.\</summary\>
-
 Building the plugin manually requires first compiling a compatible HDF5 library with ROS3 VFD support.
 
 **1. Build HDF5 Library:**
@@ -110,14 +107,9 @@ cmake .. -DCMAKE_INSTALL_PREFIX=/path/to/install
 make && make install
 ```
 
-\</details\>
-
 -----
 
 ## C++ Implementation Details
-
-\<details\>
-\<summary\>Click to expand developer notes on the driver's C++ class structure.\</summary\>
 
   * **`NisarDataset` (subclass of `GDALDataset`):** This class serves as the main entry point for interacting with a NISAR HDF5 file.
       * **Core Functionality:** As a subclass of `GDALDataset`, it represents the entire file. It is responsible for parsing the user-provided connection string, which can be a path to a local file or an S3 URL.
@@ -131,8 +123,6 @@ make && make install
       * **NoData Handling:** It correctly manages NoData values, both for reporting the value to GDAL and for padding the edges of the raster when a requested block extends beyond the data's boundaries.
 
   * **Driver Registration:** The driver is registered via `GDALRegister_NISAR()`, which is invoked when GDAL loads the plugin. This function creates and configures a `GDALDriver` object, assigning the static `NisarDataset::Open` method to the `pfnOpen` function pointer. This makes the driver available for use within the GDAL ecosystem.
-
-\</details\>
 
 -----
 
