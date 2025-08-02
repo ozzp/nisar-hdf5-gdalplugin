@@ -119,9 +119,16 @@ make && make install
 \<details\>
 \<summary\>Click to expand developer notes on the driver's C++ class structure.\</summary\>
 
-  * **`NisarDataset` (subclass of `GDALDataset`):** Represents the NISAR HDF5 dataset. It supports opening files from both local storage and AWS S3 (using the HDF5 ROS3 VFD). The driver can parse connection strings to open specific HDF5 datasets within the file; if no specific path is given, it performs subdataset discovery by iterating through the HDF5 structure to find and list relevant raster datasets (under `/science/LSAR/`). When a dataset is opened, the driver determines its raster properties (dimensions, data type, band count), creates corresponding raster bands, and attempts to set an optimized HDF5 chunk cache. It provides georeferencing information by reading the `epsg_code` or WKT from a projection dataset and calculating the GeoTransform from coordinate datasets. Metadata is handled for a default domain (attributes from the opened HDF5 dataset) and a custom `"NISAR_GLOBAL"` domain (attributes from the root group).
+  * **`NisarDataset` (subclass of `GDALDataset`):** This class serves as the main entry point for interacting with a NISAR HDF5 file.
+      * **Core Functionality:** As a subclass of `GDALDataset`, it represents the entire file. It is responsible for parsing the user-provided connection string, which can be a path to a local file or an S3 URL.
+      * **Data Access:** It can open a specific data path (e.g., `/science/LSAR/GSLC/swaths/frequencyA/HH`) within the HDF5 file. If no specific path is given, it will automatically search the file for compatible raster datasets and present them as GDAL subdatasets.
+      * **Georeferencing:** It extracts the spatial reference system (SRS) and calculates the geotransform, enabling GDAL to correctly position the raster in geographic space.
+      * **Metadata:** It reads and exposes metadata both from the global level of the HDF5 file (in a custom `NISAR_GLOBAL` domain) and from the specific raster dataset being accessed.
 
-  * **`NisarRasterBand` (subclass of `GDALRasterBand`):** Represents a single raster band within the dataset. Its constructor initializes properties like the GDAL data type and block size (matched to the HDF5 chunk size for efficiency). The core functionality lies in the overridden `IReadBlock` method, which calculates the appropriate HDF5 hyperslab corresponding to GDAL's block request, reads the pixel data using `H5Dread`, and correctly handles partial blocks at raster edges by padding the buffer.
+  * **`NisarRasterBand` (subclass of `GDALRasterBand`):** This class represents a single band of raster data (e.g., the HH polarization).
+      * **Data Reading:** Its primary role is to read pixel data from the HDF5 file in response to requests from GDAL. The core logic resides in the `IReadBlock` method, which is heavily optimized. It reads data in chunks that align with the HDF5 file's internal layout ("hyperslabs") to maximize I/O performance.
+      * **Efficiency:** Block sizes for the GDAL band are matched to the HDF5 chunk sizes, ensuring efficient data transfers.
+      * **NoData Handling:** It correctly manages NoData values, both for reporting the value to GDAL and for padding the edges of the raster when a requested block extends beyond the data's boundaries.
 
   * **Driver Registration:** The driver is registered via `GDALRegister_NISAR()`, which is invoked when GDAL loads the plugin. This function creates and configures a `GDALDriver` object, assigning the static `NisarDataset::Open` method to the `pfnOpen` function pointer. This makes the driver available for use within the GDAL ecosystem.
 
