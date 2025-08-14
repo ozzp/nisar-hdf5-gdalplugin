@@ -9,6 +9,13 @@ This document provides instructions for building the `gdal-driver-nisar` conda p
 
 1.  **Conda/Mamba**: A working installation of Conda or Mamba is required for the native macOS build.
 2.  **Docker Desktop**: Required for cross-compiling the `linux-64` package on a macOS machine.
+3.  **Conda Channel Configuration**: To avoid build failures from Anaconda's channel rate limits, your Conda installation should be configured to use the **`conda-forge`** channel exclusively. This is a one-time setup.
+    Run the following commands in your terminal:
+    ```bash
+    conda config --remove channels defaults
+    conda config --add channels conda-forge
+    conda config --set channel_priority strict
+    ```
 
 -----
 
