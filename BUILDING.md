@@ -151,7 +151,18 @@ CMD ["/bin/bash"]
 ## Building for macOS (Native)
 
 1.  Open terminal in the project directory.
-2.  Run the `conda build` command:
+2.  **Important Note for Homebrew Users:** The C++ compiler can sometimes get confused and use libraries from a Homebrew installation (`/opt/homebrew`) instead of the isolated Conda environment. This can cause the build to fail. To prevent this, you should temporarily hide your Homebrew directory during the build.
+
+      * **Hide Homebrew:** Before building, run the following command. It will ask for your password.
+        ```bash
+        sudo mv /opt/homebrew /opt/homebrew.bak
+        ```
+      * **Run the Build:** Execute the `conda build` command (see step 3).
+      * **Restore Homebrew:** After the build is finished, restore your Homebrew directory with this command:
+        ```bash
+        sudo mv /opt/homebrew.bak /opt/homebrew
+        ```
+3.  Run the `conda build` command:
     ```bash
     (unset CFLAGS; unset LDFLAGS; unset CXXFLAGS; unset CPPFLAGS; conda build . --override-channels -c conda-forge --output-folder ./conda-bld)
     ```
