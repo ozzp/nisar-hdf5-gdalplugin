@@ -153,7 +153,7 @@ CMD ["/bin/bash"]
 1.  Open terminal in the project directory.
 2.  Run the `conda build` command:
     ```bash
-    (unset CFLAGS; unset LDFLAGS; unset CXXFLAGS; unset CPPFLAGS; conda build . --output-folder ./conda-bld)
+    (unset CFLAGS; unset LDFLAGS; unset CXXFLAGS; unset CPPFLAGS; conda build . --override-channels -c conda-forge --output-folder ./conda-bld)
     ```
 This command will:
 1. Start a temporary subshell (.
