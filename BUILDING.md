@@ -164,7 +164,7 @@ CMD ["/bin/bash"]
         ```
 3.  Run the `conda build` command:
     ```bash
-    (unset CFLAGS; unset LDFLAGS; unset CXXFLAGS; unset CPPFLAGS; conda build . --override-channels -c conda-forge --output-folder ./conda-bld)
+    (unset CFLAGS; unset LDFLAGS; unset CXXFLAGS; unset CPPFLAGS; conda build . --no-test --override-channels -c conda-forge --output-folder ./conda-bld)
     ```
 This command will:
 1. Start a temporary subshell (.
