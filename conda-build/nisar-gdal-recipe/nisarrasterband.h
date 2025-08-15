@@ -35,6 +35,10 @@ class NisarRasterBand final: public GDALPamRasterBand
     friend class NisarDataset;
   private:
     hid_t hH5Type = -1; // Store copy of HDF5 native data type
+    // Cached HDF5 handles
+    hid_t m_hFileSpaceID = -1; // Cached filespace for the HDF5 dataset
+    hid_t m_hMemSpaceID = -1;  // Cached memory space for a full block
+
     // Metadata caching members for this band
     mutable char **m_papszMetadata = nullptr; // Cached merged metadata (includes HDF5 attrs)
     mutable bool m_bMetadataRead = false;    // Flag: Have we read HDF5 attrs for default domain?
