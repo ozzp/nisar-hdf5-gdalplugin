@@ -22,8 +22,8 @@
 #include <iomanip>     // for std::setprecision
 
 // TODO:Move Static Helpers to nisar_priv.h to avoid code duplication
-// --- Static Attribute Callback (Reads value, adds NAME=VALUE to list) ---
-// (Same implementation as before - reads scalar string/int/float)
+// Static Attribute Callback (Reads value, adds NAME=VALUE to list)
+// reads scalar string/int/float
 struct NISAR_AttrCallbackData {
     char ***ppapszList; // Pointer to the CSL list pointer being built
 };
@@ -56,7 +56,6 @@ static herr_t NISAR_AttributeCallback(hid_t loc_id, const char *attr_name,
         value_str = "(empty attribute)";
         bValueSet = true;
     } else if (type_class == H5T_STRING) {
-        // --- Corrected String Handling ---
         char *pszReadVL = nullptr;
         char *pszReadFixed = nullptr;
         bool bIsVariable = H5Tis_variable_str(attr_type);
@@ -99,7 +98,6 @@ static herr_t NISAR_AttributeCallback(hid_t loc_id, const char *attr_name,
              bValueSet = true;
              // TODO: Implement reading array of fixed strings if needed
         }
-        // --- End Corrected String Handling ---
 
     } else if (type_class == H5T_INTEGER && n_points == 1) {
         // (Integer reading logic as before - seems OK)
@@ -140,118 +138,76 @@ attr_cleanup:
 /* within the NISAR dataset. It includes methods for reading           */
 /* data blocks (IReadBlock) and retrieving NoData values (GetNoDataValue). */
 /************************************************************************/
-
-
-/************************************************************************/
-/*                           NisarRasterBand()                         */
-/************************************************************************/
-
 NisarRasterBand::NisarRasterBand( NisarDataset *poDSIn, int nBandIn ) :
       GDALPamRasterBand(),  //Call base class construction
       hH5Type(-1),          //Initialize custom member
       m_bMetadataRead(false)// <<< Initialize metadata flag
-      // m_MetadataMutex is default constructed
 {
-    // poDS and nBand member variables are inherited from GDALRasterBand
-    // and should be automatically set by GDAL when poDS->SetBand() is called.
-    // We use poDSIn and nBandIn here for initialization logic specific to this band.
+    this->poDS = poDSIn;
+    this->nBand = nBandIn;
 
-    // --- Basic Member Initialization ---
-    this->poDS = poDSIn;   // Store dataset pointer (inherited member)
-    this->nBand = nBandIn; // Store band number (inherited member)
-
-    // --- Validate Parent Dataset ---
-    if (!this->poDS) { // Check the inherited poDS pointer after base constructor
+    if (!poDSIn)
+    {
         CPLError(CE_Fatal, CPLE_AppDefined, "NisarRasterBand constructor: Parent dataset pointer is NULL.");
-        // Cannot proceed with initialization. Mark as invalid.
         this->eDataType = GDT_Unknown;
-        this->nBlockXSize = 0;
-        this->nBlockYSize = 0;
-        this->hH5Type = -1;
-        return; // Exit constructor in error state
+        return; // Exit constructor in an invalid state
     }
 
-    NisarDataset *poGDS = reinterpret_cast<NisarDataset *>( this->poDS );
+    NisarDataset *poGDS = static_cast<NisarDataset *>(poDSIn);
+    this->eDataType = poGDS->eDataType;
 
-
-    // Set GDAL Data Type for this band
-    // This relies on NisarDataset::Open having correctly set eDataType on poGDS
-    if (poGDS->eDataType == GDT_Unknown) {
-        CPLError(CE_Warning, CPLE_AppDefined, "NisarRasterBand constructor Band %d: Parent dataset has Unknown GDALDataType.", nBandIn);
-    }
-    this->eDataType = poGDS->eDataType; // Set inherited member
-
-
-    // --- Get HDF5 Dataset Handle ---
-    hid_t hDatasetID = poGDS->GetDatasetHandle(); // Use getter
-
-
-    //  Get and Store HDF5 Native Data Type Handle
-    if (hDatasetID >= 0) {
-         this->hH5Type = H5Dget_type(hDatasetID); // Get a *copy* of the type
-         if (this->hH5Type < 0) {
-             CPLError(CE_Warning, CPLE_AppDefined, "NisarRasterBand %d: Failed to get HDF5 native datatype handle.", nBandIn);
-             // Leave hH5Type as -1
-         } else {
-              CPLDebug("NISAR_Band", "Band %d: Stored HDF5 native data type handle.", nBandIn);
-         }
-    } else {
-        CPLError(CE_Warning, CPLE_AppDefined, "NisarRasterBand %d: Cannot get HDF5 type, parent dataset handle is invalid.", nBandIn);
-         this->hH5Type = -1; // Ensure it's marked invalid
+    // Get HDF5 Dataset Handle
+    hid_t hDatasetID = poGDS->GetDatasetHandle();
+    if (hDatasetID < 0)
+    {
+        CPLError(CE_Warning, CPLE_AppDefined, "NisarRasterBand %d: Parent dataset handle is invalid.", nBandIn);
+        return;
     }
 
+    // Get and Store HDF5 Native Data Type Handle
+    this->hH5Type = H5Dget_type(hDatasetID);
+    if (this->hH5Type < 0)
+    {
+        CPLError(CE_Warning, CPLE_AppDefined, "NisarRasterBand %d: Failed to get HDF5 native datatype handle.", nBandIn);
+    }
 
     // Determine Block Size (from HDF5 chunking)
-    // Initialize inherited block size members with defaults
-    this->nBlockXSize = 512;
-    this->nBlockYSize = 512;
+    this->nBlockXSize = 512; // Default
+    this->nBlockYSize = 512; // Default
 
-    if (hDatasetID >= 0) {
-        hid_t dcpl_id = H5Dget_create_plist(hDatasetID);
-        if (dcpl_id >= 0) {
-            if (H5Pget_layout(dcpl_id) == H5D_CHUNKED) {
-                CPLDebug("NISAR_Band", "H5D_CHUNKED is TRUE");
-                hid_t dspace_id = H5Dget_space(hDatasetID);
-                int rank = -1;
-                if(dspace_id >= 0) {
-                    rank = H5Sget_simple_extent_ndims(dspace_id);
-                    H5Sclose(dspace_id);
+    hid_t dcpl_id = H5Dget_create_plist(hDatasetID);
+    if (dcpl_id >= 0)
+    {
+        if (H5Pget_layout(dcpl_id) == H5D_CHUNKED)
+        {
+            int rank = H5Sget_simple_extent_ndims(poGDS->hDataset);
+            if (rank >= 2)
+            {
+                std::vector<hsize_t> chunk_dims(rank);
+                if (H5Pget_chunk(dcpl_id, rank, chunk_dims.data()) == rank)
+                {
+                    this->nBlockXSize = static_cast<int>(chunk_dims[rank - 1]);
+                    this->nBlockYSize = static_cast<int>(chunk_dims[rank - 2]);
                 }
-
-                if (rank >= 2) {
-                     std::vector<hsize_t> chunk_dims(rank);
-                     int chunk_rank = H5Pget_chunk(dcpl_id, rank, chunk_dims.data());
-
-                     if (chunk_rank == rank) {
-                         int chunkX = static_cast<int>(chunk_dims[rank - 1]);
-                         int chunkY = static_cast<int>(chunk_dims[rank - 2]);
-                         if (chunkX > 0 && chunkY > 0) {
-                             this->nBlockXSize = chunkX; // Set member variable
-                             this->nBlockYSize = chunkY; // Set member variable
-                             CPLDebug("NISAR_Band", "Band %d: Using HDF5 chunk size for block size: %d x %d", nBandIn, nBlockXSize, nBlockYSize);
-                         } else { /* Log warning, use default */ }
-                     } else { /* Log warning, use default */ }
-                } else { /* Log warning, use default */ }
-            } else { // Not chunked
-                 CPLDebug("NISAR_Band", "Band %d: Dataset not chunked. Using default block size %d x %d.", nBandIn, nBlockXSize, nBlockYSize);
             }
-            H5Pclose(dcpl_id);
-        } else { /* Log warning, use default */ }
-    } else { /* Log debug, use default */ }
+        }
+        H5Pclose(dcpl_id);
+    }
 
-    // Ensure block sizes are positive
-    if (this->nBlockXSize <= 0) this->nBlockXSize = 512;
-    if (this->nBlockYSize <= 0) this->nBlockYSize = 512;
+    // Create and cache HDF5 dataspace handles
+    m_hFileSpaceID = H5Dget_space(hDatasetID);
 
-    // Log final determined block size
-    CPLDebug("NISAR_Band", "Band %d: Final Block Size set to %d x %d", nBandIn, this->nBlockXSize, this->nBlockYSize);
-
-    // Note: nRasterXSize and nRasterYSize members are set by GDAL core mechanism
-    // when NisarDataset::Open calls poDS->SetBand( i, poBand );
+    hsize_t mem_dims[2] = {static_cast<hsize_t>(nBlockYSize),
+                           static_cast<hsize_t>(nBlockXSize)};
+    m_hMemSpaceID = H5Screate_simple(2, mem_dims, NULL);
 }
 
 NisarRasterBand::~NisarRasterBand()
 {
+    // Close the cached HDF5 objects
+    if (m_hMemSpaceID >= 0) H5Sclose(m_hMemSpaceID);
+    if (m_hFileSpaceID >= 0) H5Sclose(m_hFileSpaceID);
+
     if (hH5Type >= 0) {
         if (H5Tclose(hH5Type) < 0) {
              CPLError(CE_Warning, CPLE_AppDefined, "Failed to close HDF5 data type handle in ~NisarRasterBand.");
@@ -261,13 +217,13 @@ NisarRasterBand::~NisarRasterBand()
 // NisarRasterBand::GetMetadata
 char **NisarRasterBand::GetMetadata( const char *pszDomain )
 {
-    // 1. Handle non-default domains via PAM first
+    // Handle non-default domains via PAM first
     if (pszDomain != nullptr && !EQUAL(pszDomain, "")) {
          // Ensure PAM system is initialized for this band
          return GDALPamRasterBand::GetMetadata(pszDomain);
     }
 
-    // 2. Handle default domain ("" or nullptr) with caching
+    // Handle default domain ("" or nullptr) with caching
     { // Scope for lock guard
         std::lock_guard<std::mutex> lock(m_MetadataMutex);
 
@@ -313,149 +269,96 @@ char **NisarRasterBand::GetMetadata( const char *pszDomain )
 /***************************************************************************/
 /*                             IReadBlock()                                */
 /* This method reads a block of data from the HDF5 dataset.                */
-/* TBD: implement actual data reading logic using HDF5 API calls (H5Dread) */
 /***************************************************************************/
-
-CPLErr NisarRasterBand::IReadBlock( int nBlockXOff, int nBlockYOff,
-                                      void * pImage )
+CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 {
-   // Cast parent dataset pointer (poDS is inherited from GDALRasterBand)
-    NisarDataset *poGDS = reinterpret_cast<NisarDataset *>( this->poDS );
+    // Validation and Setup
+    NisarDataset *poGDS = reinterpret_cast<NisarDataset *>(this->poDS);
+    if (!poGDS || poGDS->GetDatasetHandle() < 0 || this->hH5Type < 0 ||
+        m_hFileSpaceID < 0 || m_hMemSpaceID < 0)
+    {
+        CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: Band is not properly initialized.");
+        return CE_Failure;
+    }
 
-    // Initialize handles and return status
-    hid_t hDatasetID = -1;
-    hid_t hFileSpace = -1;
-    hid_t hMemSpace = -1;
-    herr_t status = -1; // HDF5 return status
-
-    // --- Declare variables near the top ---
-    int rank = -1;
-    std::vector<hsize_t> start;
-    std::vector<hsize_t> count;
-    //std::vector<hsize_t> file_dims;
-    int nActualBlockXSize = 0;
-    int nActualBlockYSize = 0;
-    hsize_t mem_dims[2] = {0, 0}; // <<< Declare and initialize mem_dims HERE
-
-    // Validate essential inputs and handles
-    // Checks for poGDS, hDatasetID, hH5Type as before
-    if (!poGDS) { CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: Parent dataset pointer is NULL."); return CE_Failure; }
-    hDatasetID = poGDS->GetDatasetHandle();
-    if( hDatasetID < 0 ) { CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: Invalid HDF5 Dataset handle from parent."); return CE_Failure; }
-    if( this->hH5Type < 0 ) { CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: Invalid HDF5 Datatype handle for band %d.", this->nBand); return CE_Failure; }
-
-    // Get raster/block dimensions from member variables
-    nRasterXSize = this->nRasterXSize;
-    nRasterYSize = this->nRasterYSize;
-
-    CPLDebug("NISAR_IReadBlock", "Band %d: Reading block (%d, %d), BlockSize %dx%d, RasterSize %dx%d",
-             this->nBand, nBlockXOff, nBlockYOff, nBlockXSize, nBlockYSize, nRasterXSize, nRasterYSize);
-
-    // Calculate necessary sizes and check if block is completely outside
-    hsize_t start_offset_x = static_cast<hsize_t>(nBlockXOff) * nBlockXSize;
-    hsize_t start_offset_y = static_cast<hsize_t>(nBlockYOff) * nBlockYSize;
     const size_t nDataTypeSize = GDALGetDataTypeSizeBytes(this->eDataType);
     const size_t nFullBlockBytes = static_cast<size_t>(nBlockXSize) * nBlockYSize * nDataTypeSize;
 
-    if ( start_offset_x >= static_cast<hsize_t>(nRasterXSize) ||
-         start_offset_y >= static_cast<hsize_t>(nRasterYSize) ||
-         nDataTypeSize == 0 ) // Also check data type size is valid
+    // Handle Off-Image Blocks
+    hsize_t start_offset_x = static_cast<hsize_t>(nBlockXOff) * nBlockXSize;
+    hsize_t start_offset_y = static_cast<hsize_t>(nBlockYOff) * nBlockYSize;
+
+    if (start_offset_x >= static_cast<hsize_t>(nRasterXSize) ||
+        start_offset_y >= static_cast<hsize_t>(nRasterYSize) ||
+        nDataTypeSize == 0)
     {
-        CPLDebug("NISAR_IReadBlock", "Block (%d, %d) is outside bounds or data type size is zero. Filling buffer with 0.",
-                 nBlockXOff, nBlockYOff );
-        if (nFullBlockBytes > 0) memset(pImage, 0, nFullBlockBytes);
-        goto success_cleanup; // Not an error
+        memset(pImage, 0, nFullBlockBytes);
+        return CE_None;
     }
 
-    // Calculate actual block sizes to read (handles partial blocks)
-    nActualBlockXSize = std::min(nBlockXSize, nRasterXSize - static_cast<int>(start_offset_x));
-    nActualBlockYSize = std::min(nBlockYSize, nRasterYSize - static_cast<int>(start_offset_y));
+    // Read Data
+    hid_t hDatasetID = poGDS->GetDatasetHandle();
+    int rank = H5Sget_simple_extent_ndims(m_hFileSpaceID);
+    if (rank < 2) return CE_Failure; // Should have been caught earlier
 
-    if( nActualBlockXSize <= 0 || nActualBlockYSize <= 0) {
-         CPLDebug("NISAR_IReadBlock", "Calculated block read size is zero or negative (%d x %d). Filling buffer with 0.",
-                  nActualBlockXSize, nActualBlockYSize);
-         if (nFullBlockBytes > 0) memset(pImage, 0, nFullBlockBytes);
-         goto success_cleanup;  // Not an error
+    // Calculate the actual number of pixels to read (for partial blocks).
+    int nActualBlockXSize = std::min(nBlockXSize, nRasterXSize - static_cast<int>(start_offset_x));
+    int nActualBlockYSize = std::min(nBlockYSize, nRasterYSize - static_cast<int>(start_offset_y));
+
+    // Simplified partial block handling
+    // Always pre-fill the entire buffer with the fill value (0).
+    // H5Dread will then overwrite the valid data area.
+    memset(pImage, 0, nFullBlockBytes);
+
+    // Define the hyperslab (the block to read) in the HDF5 file.
+    std::vector<hsize_t> file_start(rank);
+    std::vector<hsize_t> file_count(rank);
+    file_start[rank - 2] = start_offset_y;
+    file_start[rank - 1] = start_offset_x;
+    file_count[rank - 2] = nActualBlockYSize;
+    file_count[rank - 1] = nActualBlockXSize;
+    for (int i = 0; i < rank - 2; ++i) { // Handle higher dimensions
+        file_start[i] = 0;
+        file_count[i] = 1;
     }
 
-    // Prepare HDF5 Dataspaces
-    hFileSpace = H5Dget_space(hDatasetID);
-    if( hFileSpace < 0 ) { /* CPLError */ goto error_cleanup; }
-    rank = H5Sget_simple_extent_ndims(hFileSpace);
-    if( rank < 2 ) { /* CPLError */ goto error_cleanup; }
+    herr_t status = H5Sselect_hyperslab(m_hFileSpaceID, H5S_SELECT_SET, file_start.data(),
+                                        nullptr, file_count.data(), nullptr);
+    if (status < 0) return CE_Failure;
 
-    start.resize(rank);
-    count.resize(rank);
-    start[rank - 1] = start_offset_x; start[rank - 2] = start_offset_y;
-    count[rank - 1] = nActualBlockXSize; count[rank - 2] = nActualBlockYSize;
-    if (rank > 2) { std::vector<hsize_t> file_dims(rank); if(H5Sget_simple_extent_dims(hFileSpace, file_dims.data(), nullptr)<0) { /* CPLError */ goto error_cleanup;} for(int i=0;i<rank-2;++i){ start[i]=0; count[i]=file_dims[i];} }
+    // By default, write to the entire memory buffer.
+    hid_t hMemSpace = m_hMemSpaceID;
 
-    status = H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, start.data(), NULL, count.data(), NULL);
-    if( status < 0 ) { /* CPLError */ goto error_cleanup; }
-
-    mem_dims[0] = static_cast<hsize_t>(nActualBlockYSize); // Assign to first element (Y dim)
-    mem_dims[1] = static_cast<hsize_t>(nActualBlockXSize); // Assign to second element (X dim)
-    hMemSpace = H5Screate_simple(2, mem_dims, NULL);
-    if( hMemSpace < 0 ) { /* CPLError */ goto error_cleanup; }
-
-
-    // DEBUGGING STEP: Pre-fill pImage buffer
-    CPLDebug("NISAR_IReadBlock_DEBUG", "Pre-filling %dx%d block buffer (%lu bytes) with 0xAA pattern before H5Dread.",
-             nBlockXSize, nBlockYSize, (unsigned long)nFullBlockBytes);
-    memset(pImage, 0xAA, nFullBlockBytes);
-
-
-    // Read the Data
-    CPLDebug("NISAR_IReadBlock", "Band %d: Reading %dx%d hyperslab at offset %llu,%llu into buffer.",
-             this->nBand, nActualBlockXSize, nActualBlockYSize,
-             (unsigned long long)start[rank-1], (unsigned long long)start[rank-2]);
-
-    status = H5Dread(hDatasetID, this->hH5Type, hMemSpace, hFileSpace, H5P_DEFAULT, pImage);
-
-    if( status < 0 ) {
-        CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: H5Dread failed for block %d, %d.", nBlockXOff, nBlockYOff);
-        H5Eprint(H5E_DEFAULT, stderr);
-        goto error_cleanup;
-    }
-
-    // Handle Partial Block Padding (Fill unused area with 0)
+    // If reading a partial block, select a smaller hyperslab in memory.
+    // This tells H5Dread to place the partial data at the top-left
+    // of the buffer, leaving the rest untouched (already filled with 0).
     if (nActualBlockXSize < nBlockXSize || nActualBlockYSize < nBlockYSize)
     {
-        CPLDebug("NISAR_IReadBlock", "Band %d: Partial block read (%dx%d vs %dx%d). Padding unused buffer area with 0.",
-                 this->nBand, nActualBlockXSize, nActualBlockYSize, nBlockXSize, nBlockYSize);
+        hsize_t mem_start[2] = {0, 0};
+        hsize_t mem_count[2] = {static_cast<hsize_t>(nActualBlockYSize),
+                                static_cast<hsize_t>(nActualBlockXSize)};
+        status = H5Sselect_hyperslab(m_hMemSpaceID, H5S_SELECT_SET, mem_start,
+                                     nullptr, mem_count, nullptr);
+        if (status < 0) return CE_Failure;
+    } else {
+        // For a full block, select the entire memory space.
+        H5Sselect_all(m_hMemSpaceID);
+    }
 
-        GByte* pabyData = static_cast<GByte*>(pImage);
-        const int nFillValue = 0; // Use integer 0 for memset
+    // Read the data from the file hyperslab to the memory hyperslab.
+    status = H5Dread(hDatasetID, this->hH5Type, hMemSpace, m_hFileSpaceID,
+                     H5P_DEFAULT, pImage);
 
-        // Pad columns to the right (if X is partial)
-        if (nActualBlockXSize < nBlockXSize) {
-            for(int iLine = 0; iLine < nActualBlockYSize; ++iLine) {
-                GByte* pabyOffset = pabyData + (static_cast<size_t>(iLine) * nBlockXSize + nActualBlockXSize) * nDataTypeSize;
-                size_t nBytesToPad = static_cast<size_t>(nBlockXSize - nActualBlockXSize) * nDataTypeSize;
-                memset(pabyOffset, nFillValue, nBytesToPad);
-            }
-        }
-        // Pad rows below (if Y is partial)
-        if (nActualBlockYSize < nBlockYSize) {
-            GByte* pabyOffset = pabyData + static_cast<size_t>(nActualBlockYSize) * nBlockXSize * nDataTypeSize;
-            size_t nBytesToPad = static_cast<size_t>(nBlockYSize - nActualBlockYSize) * nBlockXSize * nDataTypeSize;
-            memset(pabyOffset, nFillValue, nBytesToPad);
-        }
-    } // End partial block padding
+    if (status < 0)
+    {
+        CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: H5Dread failed for block %d, %d.",
+                 nBlockXOff, nBlockYOff);
+        H5Eprint(H5E_DEFAULT, stderr);
+        return CE_Failure;
+    }
 
-// Cleanup and Return Success
-success_cleanup:
-    if(hMemSpace >= 0) H5Sclose(hMemSpace);
-    if(hFileSpace >= 0) H5Sclose(hFileSpace);
     return CE_None;
-
-// Cleanup and Return Failure
-error_cleanup:
-    if(hMemSpace >= 0) H5Sclose(hMemSpace);
-    if(hFileSpace >= 0) H5Sclose(hFileSpace);
-    return CE_Failure;
-} // End IReadBlock
-
+}
 /************************************************************************/
 /*                           GetNoDataValue()                           */
 /* This method retrieves the NoData value from the HDF5 metadata if available.*/
@@ -469,132 +372,3 @@ double NisarRasterBand::GetNoDataValue( int *pbSuccess )
 
     return 0.0;
 }
-/*
-char **NisarRasterBand::GetMetadata( const char * pszDomain )
-{
-    if( pszDomain != nullptr && !EQUAL(pszDomain, "") )
-        return GDALRasterBand::GetMetadata(pszDomain);
-
-    CPLStringList aosList;
-
-    H5A_info_t attr_info;
-    for (hsize_t i = 0; H5Aget_info(poDS->hDataset, i, &attr_info) >= 0; ++i) {
-        hid_t hAttribute = H5Aopen(poDS->hDataset, attr_info.name, H5P_DEFAULT);
-        if (hAttribute >= 0) {
-            hid_t hDataType = H5Aget_type(hAttribute);
-            size_t size = H5Tget_size(hDataType);
-            if (H5Tget_class(hDataType) == H5T_STRING) {
-                char *pszValue = new char[size + 1];
-                herr_t hRet = H5Aread(hAttribute, hDataType, pszValue);
-                if (hRet >= 0) {
-                    pszValue[size] = '\0';
-                    aosList.SetNameValue(attr_info.name, pszValue);
-                }
-                deletepszValue;
-            } else if (H5Tget_class(hDataType) == H5T_INTEGER || H5Tget_class(hDataType) == H5T_FLOAT) {
-                aosList.SetNameValue(attr_info.name, "(numeric)");
-            }
-            H5Aclose(hAttribute);
-            H5Tclose(hDataType);
-        }
-    }
-
-    return aosList.List();
-}
-
-GDALDataType NisarRasterBand::GetRasterDataType() const
-{
-    NisarDataset *poNisarDS = (NisarDataset *)poDS;
-    hid_t hHDF5 = poNisarDS->hHDF5;
-    GDALDataType eDataType = GDT_Unknown;
-    herr_t status;
-    hid_t hDataset = -1;
-    hid_t hDataType = -1;
-
-    // Construct the path to the specific band's dataset
-    std::string datasetPath = "/science/LSAR/GSLC/grids/frequencyA/HH"; // Adjust based on band number or metadata
-
-    hDataset = H5Dopen(hHDF5, datasetPath.c_str(), H5P_DEFAULT);
-    if (hDataset < 0) {
-        CPLError(CE_Warning, CPLE_OpenFailed, "Failed to open HDF5 dataset for band.");
-        goto cleanup;
-    }
-
-    hDataType = H5Dget_type(hDataset);
-    if (hDataType < 0) {
-        CPLError(CE_Warning, CPLE_OpenFailed, "Failed to get HDF5 datatype for band.");
-        goto cleanup;
-    }
-
-    H5T_class_t eHDF5Class = H5Tget_class(hDataType);
-    size_t size = H5Tget_size(hDataType);
-
-    if (eHDF5Class == H5T_FLOAT) {
-        if (size == 4)
-            eDataType = GDT_Float32;
-        else if (size == 8)
-            eDataType = GDT_Float64;
-    } else if (eHDF5Class == H5T_INTEGER) {
-        if (H5Tget_sign(hDataType) == H5T_SGN_NONE) { // Unsigned
-            if (size == 1)
-                eDataType = GDT_Byte;
-            else if (size == 2)
-                eDataType = GDT_UInt16;
-            else if (size == 4)
-                eDataType = GDT_UInt32;
-            else if (size == 8)
-                eDataType = GDT_UInt64;
-        } else { // Signed
-            if (size == 2)
-                eDataType = GDT_Int16;
-            else if (size == 4)
-                eDataType = GDT_Int32;
-            else if (size == 8)
-                eDataType = GDT_Int64;
-        }
-    } else if (eHDF5Class == H5T_COMPOUND) {
-        // Check for complex data type
-        if (H5Tget_nmembers(hDataType) == 2) {
-            hid_t hRealType = H5Tget_member_type(hDataType, 0);
-            hid_t hImagType = H5Tget_member_type(hDataType, 1);
-            if (H5Tequal(hRealType, hImagType) > 0) {
-                size_t elem_size = H5Tget_size(hRealType);
-                char *name1 = H5Tget_member_name(hDataType, 0);
-                char *name2 = H5Tget_member_name(hDataType, 1);
-                bool isReal = (name1 && (name1[0] == 'r' || name1[0] == 'R'));
-                bool isImaginary = (name2 && (name2[0] == 'i' || name2[0] == 'I'));
-                H5free_memory(name1);
-                H5free_memory(name2);
-
-                if (isReal && isImaginary) {
-                    if (H5Tequal(hRealType, H5T_NATIVE_FLOAT) > 0 && elem_size == 4)
-                        eDataType = GDT_CFloat32;
-                    else if (H5Tequal(hRealType, H5T_NATIVE_DOUBLE) > 0 && elem_size == 8)
-                        eDataType = GDT_CFloat64;
-                    else if (H5Tequal(hRealType, H5T_NATIVE_SHORT) > 0 && elem_size == 2)
-                        eDataType = GDT_CInt16;
-                    else if (H5Tequal(hRealType, H5T_NATIVE_INT) > 0 && elem_size == 4)
-                        eDataType = GDT_CInt32;
-                    // Add other complex types if needed (e.g., complex int64, complex float16)
-                }
-            }
-            H5Tclose(hRealType);
-            H5Tclose(hImagType);
-        }
-    }
-
-cleanup:
-    if (hDataType >= 0) H5Tclose(hDataType);
-    if (hDataset >= 0) H5Dclose(hDataset);
-    return eDataType;
-}
-*/
-/*
-GDALColorInterp NisarRasterBand::GetColorInterpretation()
-{
-    // For now, we'll just return undefined. You might need to add logic
-    // to check for specific attributes or conventions in your NISAR files
-    // to determine the color interpretation.
-    return GCI_Undefined;
-}
-*/
