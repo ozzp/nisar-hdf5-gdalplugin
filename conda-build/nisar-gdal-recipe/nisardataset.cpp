@@ -18,6 +18,7 @@
 
 #include "cpl_port.h"
 #include "cpl_conv.h"
+#include "nisar_priv.h"
 #include "H5FDros3.h" // For H5FD_ros3_fapl_t and H5FD_CURR_ROS3_FAPL_T_VERSION
 
 // Forward declaration for the helper function
@@ -27,142 +28,25 @@ static std::string get_hdf5_object_name(hid_t hObjID);
 // TBD: Define default dataset for each product?
 const char *DEFAULT_NISAR_HDF5_PATH = "/science/LSAR/GSLC/grids/frequencyA/HH"; // Example
 
-// --- New Callback Struct and Function for SetMetadataItem ---
+// New Callback Struct and Function for SetMetadataItem
 struct NISAR_AttrCallbackData_SetItem {
     NisarDataset* poDS; // Pointer to the dataset object
 };
 
-// --- Static Attribute Callback (Reads value, adds NAME=VALUE to list) ---
-// (Same implementation as before - reads scalar string/int/float)
-struct NISAR_AttrCallbackData {
-    char ***ppapszList; // Pointer to the CSL list pointer being built
-};
-
-static herr_t NISAR_AttributeCallback(hid_t loc_id, const char *attr_name,
-                                      const H5A_info_t * /*ainfo*/, void *op_data)
-{
-   NISAR_AttrCallbackData *data = static_cast<NISAR_AttrCallbackData*>(op_data);
-    if (!data || !data->ppapszList) {
-        CPLError(CE_Failure, CPLE_AppDefined, "Attribute callback received invalid op_data.");
-        return H5_ITER_ERROR;
-    }
-
-    // --- Declare variables at the top ---
-    hid_t attr_id = -1;
-    hid_t attr_type = -1;   // Filespace type
-    hid_t attr_space = -1;
-    hid_t mem_type = -1;    // Memory type for reading data
-    std::string value_str;
-    herr_t status = -1;
-    bool bValueSet = false;
-    H5T_class_t type_class = H5T_NO_CLASS;
-    hssize_t n_points = -1;
-    size_t type_size = 0;
-    char *pszReadVL = nullptr;
-    char *pszReadFixed = nullptr;
-    long long llVal = 0;
-    double dfVal = 0.0;
-
-    CPLDebug("NISAR_ATTR_CB", "Callback for attribute: '%s'", attr_name);
-
-    attr_id = H5Aopen_by_name(loc_id, ".", attr_name, H5P_DEFAULT, H5P_DEFAULT);
-    if (attr_id < 0) { CPLDebug("NISAR_ATTR_CB", "--> H5Aopen_by_name failed"); goto attr_cleanup_cb; }
-
-    attr_type = H5Aget_type(attr_id); if (attr_type < 0) { CPLDebug("NISAR_ATTR_CB", "--> H5Aget_type failed"); goto attr_cleanup_cb; }
-    attr_space = H5Aget_space(attr_id); if (attr_space < 0) { CPLDebug("NISAR_ATTR_CB", "--> H5Aget_space failed"); goto attr_cleanup_cb; }
-
-    type_class = H5Tget_class(attr_type);
-    n_points = H5Sget_simple_extent_npoints(attr_space);
-    type_size = H5Tget_size(attr_type);
-
-    CPLDebug("NISAR_ATTR_CB", "--> Attr '%s': Class=%d, NPoints=%lld, Size=%lu", attr_name, (int)type_class, (long long)n_points, (unsigned long)type_size);
-
-    // --- Read Attribute Value based on Type ---
-    if (n_points <= 0) { value_str = ""; bValueSet = true; }
-    else if (type_class == H5T_STRING) {
-        bool bIsVariable = H5Tis_variable_str(attr_type);
-        // Create a memory type that matches the file type's characteristics
-        mem_type = H5Tget_native_type(attr_type, H5T_DIR_ASCEND);
-        if (mem_type < 0) { CPLError(CE_Warning, CPLE_AppDefined, "Failed to get native string type for '%s'", attr_name); goto attr_cleanup_cb; }
-
-        if(bIsVariable) {
-            // Ensure memory type is also variable length
-            if (!H5Tis_variable_str(mem_type)) { H5Tset_size(mem_type, H5T_VARIABLE); }
-            // Read VLEN string using the created memory type. HDF5 allocates memory.
-            status = H5Aread(attr_id, mem_type, &pszReadVL);
-            if(status >= 0 && pszReadVL != nullptr) {
-                 value_str = pszReadVL; bValueSet = true;
-                 CPLDebug("NISAR_ATTR_CB", "--> Read VLEN String OK");
-                 // Must use H5free_memory for VLEN data read by HDF5 into char**
-                 H5free_memory(pszReadVL);
-                 pszReadVL = nullptr;
-            } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read VLEN string attr '%s'", attr_name); }
-        } else if (type_size > 0 && n_points == 1) { // Fixed length string (scalar)
-             // Ensure memory type size matches file type size
-             if(H5Tget_size(mem_type) != type_size) H5Tset_size(mem_type, type_size);
-             // Ensure null termination/padding matches file type if possible
-             H5T_str_t pad = H5Tget_strpad(attr_type); H5Tset_strpad(mem_type, pad);
-             // Ensure character set matches file type if possible (ASCII vs UTF8)
-             H5T_cset_t cset = H5Tget_cset(attr_type); H5Tset_cset(mem_type, cset);
-
-             pszReadFixed = (char *)VSIMalloc(type_size + 1); // Allocate buffer + 1 for safety null
-             if (pszReadFixed) {
-                 status = H5Aread(attr_id, mem_type, pszReadFixed); // Read using configured mem_type
-                 if (status >= 0) {
-                      pszReadFixed[type_size] = '\0'; // Ensure null termination
-                      value_str = pszReadFixed;
-                      // Trim trailing nulls specifically, as HDF5 might pad with them
-                      size_t first_null = value_str.find('\0');
-                      if (first_null != std::string::npos) {
-                          value_str = value_str.substr(0, first_null);
-                      }
-                      bValueSet = true;
-                      CPLDebug("NISAR_ATTR_CB", "--> Read Fixed String OK: '%s'", value_str.c_str());
-                 } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read fixed string attr '%s'", attr_name); }
-                 VSIFree(pszReadFixed); pszReadFixed = nullptr;
-            } else { CPLError(CE_Failure, CPLE_OutOfMemory, "Malloc failed for fixed string attr '%s'", attr_name); }
-        } else if (type_size > 0 && n_points > 1) { value_str = CPLSPrintf("(array of fixed strings size %lld)", (long long)n_points); bValueSet = true; }
-        // Close mem_type handle
-        if (mem_type >= 0) { H5Tclose(mem_type); mem_type = -1; }
-    } else if (type_class == H5T_INTEGER && n_points == 1) {
-        // ... (Integer reading logic) ...
-        long long llVal = 0; status = H5Aread(attr_id, H5T_NATIVE_LLONG, &llVal); if (status >= 0) { value_str = CPLSPrintf("%lld", llVal); bValueSet = true; CPLDebug("NISAR_ATTR_CB", "--> Read Integer OK"); } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read integer attr '%s'", attr_name); }
-    } else if (type_class == H5T_FLOAT && n_points == 1) {
-        // ... (Float reading logic) ...
-         double dfVal = 0.0; status = H5Aread(attr_id, H5T_NATIVE_DOUBLE, &dfVal); if (status >= 0) { std::ostringstream oss; oss << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10); oss << dfVal; value_str = oss.str(); if (value_str == "nan" || value_str == "-nan") value_str = "nan"; else if (value_str == "inf") value_str = "inf"; else if (value_str == "-inf") value_str = "-inf"; bValueSet = true; CPLDebug("NISAR_ATTR_CB", "--> Read Float OK"); } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read float attr '%s'", attr_name); }
-    } else if (n_points > 1) {
-        // ... (Array handling logic) ...
-         if (type_class == H5T_REFERENCE || (type_class == H5T_VLEN && H5Tequal(H5Tget_super(attr_type), H5T_STD_REF_OBJ))) { value_str = CPLSPrintf("(object reference list size %lld)", (long long)n_points); }
-         else { value_str = CPLSPrintf("(array attribute type %d size %lld)", type_class, (long long)n_points); }
-        bValueSet = true;
-    } else { value_str = CPLSPrintf("(unhandled scalar type class %d)", type_class); bValueSet = true; }
-
-    // Add NAME=VALUE to CSL list
-    if (bValueSet) { *(data->ppapszList) = CSLSetNameValue(*(data->ppapszList), attr_name, value_str.c_str()); }
-    else { *(data->ppapszList) = CSLSetNameValue(*(data->ppapszList), attr_name, "(Error reading attribute)"); }
-
-attr_cleanup_cb:
-    if (mem_type >= 0) H5Tclose(mem_type);
-    if (attr_type >= 0) H5Tclose(attr_type);
-    if (attr_space >= 0) H5Sclose(attr_space);
-    if (attr_id >= 0) H5Aclose(attr_id);
-    return 0; // Continue H5Aiterate iteration
-}
-
-// Struct and Callback for Reading Identification Datasets ---
+// Struct and Callback for Reading Identification Datasets
 struct NISAR_IdentCallbackData {
     char ***ppapszList; // Pointer to the CSL list pointer being built
     hid_t hIdentGroup;   // Handle to the identification group
 };
 
 
-// --- Struct to pass data to H5Aiterate callback ---
+// Struct to pass data to H5Aiterate callback
 struct MetadataAttrCallbackData {
     char ***ppapszList;        // Pointer to the CSL list pointer in GetMetadata
     const char *pszObjectPath; // Full path of the object being iterated
 };
 
-// --- Struct to pass data to H5Ovisit callback ---
+// Struct to pass data to H5Ovisit callback
 struct MetadataVisitData {
     char ***ppapszList; // Pointer to the CSL list pointer in GetMetadata
     // Could add filters here, e.g., std::string rootPathFilter;
@@ -206,12 +90,12 @@ static herr_t NISAR_IdentificationDatasetCallback(hid_t group_id, const char *me
     dtype = H5Dget_type(dset_id);
     if (dspace < 0 || dtype < 0) goto ident_cleanup;
 
-    // --- Check if it's a scalar dataset ---
+    // Check if it's a scalar dataset
     if (H5Sget_simple_extent_type(dspace) == H5S_SCALAR) {
         H5T_class_t type_class = H5Tget_class(dtype);
         size_t type_size = H5Tget_size(dtype);
 
-        // --- Read Scalar Value (Primarily expecting strings) ---
+        // Read Scalar Value (Primarily expecting strings)
         if (type_class == H5T_STRING) {
             char *pszReadVL = nullptr; char *pszReadFixed = nullptr;
             bool bIsVariable = H5Tis_variable_str(dtype);
@@ -363,7 +247,7 @@ static herr_t NISAR_FindDatasetsVisitor(hid_t obj_id /* ID of object being visit
 
 GDALDataType NisarDataset::GetGDALDataType(hid_t hH5Type)
 {
-    // --- Check Simple Native Types First ---
+    // Check Simple Native Types First
     // Use H5Tequal for robust comparison against predefined native types
     if( H5Tequal(hH5Type, H5T_NATIVE_FLOAT) > 0 )  return GDT_Float32;
     if( H5Tequal(hH5Type, H5T_NATIVE_DOUBLE) > 0 ) return GDT_Float64;
@@ -378,7 +262,7 @@ GDALDataType NisarDataset::GetGDALDataType(hid_t hH5Type)
     if( H5Tequal(hH5Type, H5T_NATIVE_UINT64) > 0 ) return GDT_UInt64;
     // Add other simple native types if necessary (char, long, etc.)
 
-    // --- Check if it's a Compound Type (Potentially Complex) ---
+    // Check if it's a Compound Type (Potentially Complex)
     H5T_class_t eHDF5Class = H5Tget_class(hH5Type);
     if (eHDF5Class == H5T_COMPOUND) {
         CPLDebug("NISAR_GetGDALDataType", "Checking HDF5 Compound type for complex mapping.");
@@ -438,7 +322,7 @@ GDALDataType NisarDataset::GetGDALDataType(hid_t hH5Type)
         CPLDebug("NISAR_GetGDALDataType", "Compound type did not match expected complex structure.");
     } // end if compound
 
-    // --- Handle Other HDF5 Types or Unknown ---
+    // Handle Other HDF5 Types or Unknown
     // Example: Check for strings if needed (unlikely for main raster bands)
     // if (eHDF5Class == H5T_STRING) { return GDT_String; }
 
@@ -730,7 +614,7 @@ char **NisarDataset::GetMetadata( const char *pszDomain )
         return GDALPamDataset::GetMetadata(pszDomain);
     } // End default domain handling
 
-    // --- Handle other domains via PAM ---
+    // Handle other domains via PAM
     TryLoadXML();
     return GDALPamDataset::GetMetadata(pszDomain);
 }
@@ -837,7 +721,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
         return nullptr;
     }
     
-    // Prepare Base FAPL & Filename for Pass 1 ---
+    // Prepare Base FAPL & Filename for Pass 1 
     hid_t fapl_id_pass1 = H5P_DEFAULT;
     const char* filenameForH5Fopen = pszActualFilename;
     std::string final_url_storage;
@@ -845,7 +729,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     const char* s3_path_part = nullptr;
     bool bNeedToCloseFapl1 = false; 
  
-    // Prepare for H5Fopen: Handle Local vs S3 & Configure FAPL ---
+    // Prepare for H5Fopen: Handle Local vs S3 & Configure FAPL
     //hid_t hHDF5 = -1;                      // Handle for the opened HDF5 file
     //hid_t fapl_id = H5P_DEFAULT;           // File Access Property List, default for local
     //const char* filenameForH5Fopen = pszActualFilename; // Use parsed name by default
@@ -1001,7 +885,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
         CPLDebug("NISAR_DRIVER", "Assuming local file path, using default HDF5 FAPL.");
     }
 
-    // Pass 1: Open, Get Page Size, Close ---
+    // Pass 1: Open, Get Page Size, Close
     hsize_t actual_page_size = 0; // Store the result here
     hid_t hHDF5_pass1 = -1;
     hid_t fcpl_id = -1;
@@ -1040,7 +924,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     // We no longer need fapl_id_pass1, close if needed
     if (bNeedToCloseFapl1) { H5Pclose(fapl_id_pass1); bNeedToCloseFapl1 = false; fapl_id_pass1 = H5P_DEFAULT; } 
 
-    // Prepare Optimized FAPL for Pass 2 ---
+    // Prepare Optimized FAPL for Pass 2
     hid_t fapl_id_pass2 = H5P_DEFAULT;
     bool bNeedToCloseFapl2 = false;
 
@@ -1191,7 +1075,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
          CPLDebug("NISAR_DRIVER", "Using default FAPL for Pass 2 (local file).");
     }
 
-    //  Pass 2: Re-Open HDF5 File with Optimized FAPL ---
+    //  Pass 2: Re-Open HDF5 File with Optimized FAPL
     hid_t hHDF5 = -1; // This will be the final handle stored in poDS
     CPLDebug("NISAR_DRIVER", "Attempting H5Fopen (Pass 2 - Optimized) with filename: %s", filenameForH5Fopen);
     hHDF5 = H5Fopen( filenameForH5Fopen, H5F_ACC_RDONLY, fapl_id_pass2 );
@@ -1225,14 +1109,14 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     // ** or with signature errors later.                              **
     // ******************************************************************
 
-    // Open the HDF5 File ---
+    // Open the HDF5 File
     // Temporarily suppress HDF5 error stack printing to avoid noise if file is not HDF5
     //H5E_auto2_t old_func;
     //void *old_client_data;
     //H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
     //H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
  
-    // Identification Check (Post-Open) ---
+    // Identification Check (Post-Open)
     htri_t groupExists = H5Lexists(hHDF5, "/science/LSAR", H5P_DEFAULT);
     if (groupExists <= 0) {
        CPLDebug("NISAR_DRIVER", "File '%s' lacks expected '/science/LSAR' group. Not treating as NISAR.", filenameForH5Fopen);
@@ -1250,7 +1134,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     NisarDataset *poDS = nullptr;
 
     if (pszSubdatasetPath == nullptr) {
-        // CASE 1: No specific subdataset requested - Perform Discovery ---
+        // CASE 1: No specific subdataset requested - Perform Discovery
         CPLDebug("NISAR_DRIVER", "No specific HDF5 dataset path provided. Running subdataset discovery.");
 
         // Create preliminary dataset object to hold results and file handle
@@ -1489,7 +1373,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     }
     CPLDebug("NISAR_DRIVER", "Dataset Dimensions: %d x %d", poDS->nRasterXSize, poDS->nRasterYSize);
 
-    // --- Determine Band Count ---
+    // Determine Band Count
     if (GDALDataTypeIsComplex(poDS->eDataType)) {
        poDS->nBands = 1; // Convention: Represent complex as one GDAL band
        CPLDebug("NISAR_DRIVER", "Data type is complex, setting Band Count to: %d (single complex band convention)", poDS->nBands);
@@ -1537,12 +1421,12 @@ CPLErr NisarDataset::GetGeoTransform( double * padfTransform )
 {
     CPLDebug("NISAR_DRIVER", "NisarDataset::GetGeoTransform() called.");
 
-    // --- Initialize output and local variables ---
+    // Initialize output and local variables
     // Default identity transform (required by GDAL if specific transform not found)
     padfTransform[0] = 0.0;  padfTransform[1] = 1.0;  padfTransform[2] = 0.0;
     padfTransform[3] = 0.0;  padfTransform[4] = 0.0;  padfTransform[5] = 1.0;
     
-    // --- Check if this is a container dataset (no raster bands) ---
+    // Check if this is a container dataset (no raster bands)
     // If nRasterXSize is 0 (set during subdataset discovery), return default GT.
     // Also check if the main dataset handle is valid.
     if (nRasterXSize == 0 || hDataset < 0) {
@@ -1756,7 +1640,7 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     }
      // Could also check nRasterXSize == 0, but hDataset < 0 is sufficient
 
-    // --- Initialize local variables ---
+    // Initialize local variables
     OGRSpatialReference *poSRS = nullptr; // Pointer to the SRS object we might create
     hid_t hProjectionDataset = -1; // Handle for the 'projection' dataset
     hid_t hAttribute = -1;         // Handle for attributes 'epsg_code' or 'spatial_ref'
@@ -1775,7 +1659,7 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     // Temporary pointer for newly created SRS object during processing
     OGRSpatialReference *poTmpSRS = nullptr;
 
-    // --- Determine Path to Projection Info ---
+    // Determine Path to Projection Info
     // Need to find the group containing the main dataset first
     if (this->hDataset < 0) {
         CPLError(CE_Warning, CPLE_AppDefined, "GetSpatialRef: Invalid main dataset handle.");
@@ -1797,14 +1681,14 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     projectionPath = groupPath + (groupPath == "/" ? "" : "/") + "projection";
     CPLDebug("NISAR_DRIVER", "Attempting to open projection dataset: %s", projectionPath.c_str());
 
-    // --- Open the Projection "Dataset" (often just holds attributes) ---
+    // Open the Projection "Dataset" (often just holds attributes)
     hProjectionDataset = H5Dopen2( this->hHDF5, projectionPath.c_str(), H5P_DEFAULT );
     if (hProjectionDataset < 0) {
         CPLError(CE_Warning, CPLE_OpenFailed, "GetSpatialRef: Failed to open projection dataset: '%s'. No SRS available.", projectionPath.c_str());
         goto cleanup; // Go directly to cleanup, will return nullptr
     }
 
-    // --- Try Reading EPSG Code Attribute ---
+    // Try Reading EPSG Code Attribute
     hAttribute = H5Aopen(hProjectionDataset, "epsg_code", H5P_DEFAULT);
 
     if (hAttribute >= 0) { // Found an EPSG attribute
@@ -1848,7 +1732,7 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     } else { CPLDebug("NISAR_DRIVER", "EPSG attribute not found."); }
 
 
-    // --- Try Reading WKT Attribute if EPSG failed or not found ---
+    // Try Reading WKT Attribute if EPSG failed or not found
     if (poSRS == nullptr) {
         CPLDebug("NISAR_DRIVER", "Attempting to read WKT from 'spatial_ref' attribute.");
         hAttribute = H5Aopen(hProjectionDataset, "spatial_ref", H5P_DEFAULT); // Try "spatial_ref"
