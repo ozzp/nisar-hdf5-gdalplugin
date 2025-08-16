@@ -12,6 +12,7 @@
 
 #include "nisarrasterband.h"
 #include "nisardataset.h"
+#include "nisar_priv.h"
 #include "hdf5.h"
 #include "gdal.h"        // For CE_Failure, CE_None, GDALDataType
 #include "cpl_conv.h"
@@ -20,115 +21,6 @@
 #include <cstring>     // For memset
 #include <mutex>       // For std::lock_guard
 #include <iomanip>     // for std::setprecision
-
-// TODO:Move Static Helpers to nisar_priv.h to avoid code duplication
-// Static Attribute Callback (Reads value, adds NAME=VALUE to list)
-// reads scalar string/int/float
-struct NISAR_AttrCallbackData {
-    char ***ppapszList; // Pointer to the CSL list pointer being built
-};
-static herr_t NISAR_AttributeCallback(hid_t loc_id, const char *attr_name,
-                                      const H5A_info_t * /*ainfo*/, void *op_data)
-{
-    NISAR_AttrCallbackData *data = static_cast<NISAR_AttrCallbackData*>(op_data);
-    hid_t attr_id = -1;
-    hid_t attr_type = -1;
-    hid_t attr_space = -1;
-    // hid_t mem_type = -1; // No longer needed for strings here
-    std::string value_str;
-    herr_t status = -1;
-    bool bValueSet = false;
-
-    attr_id = H5Aopen_by_name(loc_id, ".", attr_name, H5P_DEFAULT, H5P_DEFAULT);
-    if (attr_id < 0) return 0; // Skip attribute on open failure
-
-    attr_type = H5Aget_type(attr_id);
-    if (attr_type < 0) { H5Aclose(attr_id); return 0; }
-
-    attr_space = H5Aget_space(attr_id);
-    if (attr_space < 0) { H5Tclose(attr_type); H5Aclose(attr_id); return 0; }
-
-    H5T_class_t type_class = H5Tget_class(attr_type);
-    hssize_t n_points = H5Sget_simple_extent_npoints(attr_space);
-    size_t type_size = H5Tget_size(attr_type); // Size in bytes for fixed types
-
-    if (n_points <= 0) {
-        value_str = "(empty attribute)";
-        bValueSet = true;
-    } else if (type_class == H5T_STRING) {
-        char *pszReadVL = nullptr;
-        char *pszReadFixed = nullptr;
-        bool bIsVariable = H5Tis_variable_str(attr_type);
-
-        if(bIsVariable) {
-            // For VLEN strings, read using the FILE type (attr_type).
-            // H5Aread will allocate memory pointed to by &pszReadVL.
-            status = H5Aread(attr_id, attr_type, &pszReadVL); // Pass attr_type!
-            if(status >= 0 && pszReadVL != nullptr) {
-                 value_str = pszReadVL; // Copy content
-                 bValueSet = true;
-                 // Free using H5Dvlen_reclaim which requires type and space
-                 // Make sure dataspace is scalar for single VLEN string attribute
-                 if (H5Sget_simple_extent_type(attr_space) == H5S_SCALAR) {
-                      status = H5Dvlen_reclaim(attr_type, attr_space, H5P_DEFAULT, &pszReadVL);
-                      if (status < 0) { CPLError(CE_Warning, CPLE_AppDefined, "H5Dvlen_reclaim failed for VLEN string attr '%s'.", attr_name); }
-                 } else {
-                      CPLError(CE_Warning, CPLE_AppDefined, "VLEN string attribute '%s' does not have scalar dataspace? Cannot reclaim reliably.", attr_name);
-                      H5free_memory(pszReadVL); // Use H5free_memory as fallback if reclaim fails/inapplicable
-                 }
-                 pszReadVL = nullptr;
-            } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read VLEN string attr '%s'", attr_name); }
-        } else if (type_size > 0 && n_points == 1) { // Fixed length string (scalar)
-            pszReadFixed = (char *)VSIMalloc(type_size + 1); // Use VSI Alloc
-            if (pszReadFixed) {
-                 // Read using the file type (attr_type) into pre-allocated buffer
-                 status = H5Aread(attr_id, attr_type, pszReadFixed);
-                 if (status >= 0) {
-                      // Ensure null termination based on HDF5 padding rules (or manually)
-                      // H5T_STR_NULLTERM padding (default usually) means it should be there if size allows
-                      // Manual termination is safest:
-                      pszReadFixed[type_size] = '\0';
-                      value_str = pszReadFixed;
-                      bValueSet = true;
-                 } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read fixed string attr '%s'", attr_name); }
-                 VSIFree(pszReadFixed); pszReadFixed = nullptr;
-            } else { CPLError(CE_Failure, CPLE_OutOfMemory, "Malloc failed for fixed string attr '%s'", attr_name); }
-        } else if (type_size > 0 && n_points > 1) { // Array of fixed strings
-             value_str = CPLSPrintf("(array of fixed strings size %lld)", (long long)n_points);
-             bValueSet = true;
-             // TODO: Implement reading array of fixed strings if needed
-        }
-
-    } else if (type_class == H5T_INTEGER && n_points == 1) {
-        // (Integer reading logic as before - seems OK)
-        long long llVal = 0; status = H5Aread(attr_id, H5T_NATIVE_LLONG, &llVal); if (status >= 0) { value_str = CPLSPrintf("%lld", llVal); bValueSet = true; } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read integer attr '%s'", attr_name); }
-    } else if (type_class == H5T_FLOAT && n_points == 1) {
-        // (Float reading logic as before - seems OK, uses ostringstream now)
-         double dfVal = 0.0; status = H5Aread(attr_id, H5T_NATIVE_DOUBLE, &dfVal); if (status >= 0) { std::ostringstream oss; oss << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10); oss << dfVal; value_str = oss.str(); if (value_str == "nan" || value_str == "-nan") value_str = "nan"; else if (value_str == "inf") value_str = "inf"; else if (value_str == "-inf") value_str = "-inf"; bValueSet = true; } else { CPLError(CE_Warning, CPLE_FileIO, "Failed read float attr '%s'", attr_name); }
-    } else if (n_points > 1) { // Handle other arrays
-        // (Object Reference handling as before)
-         if (type_class == H5T_REFERENCE || (type_class == H5T_VLEN && H5Tequal(H5Tget_super(attr_type), H5T_STD_REF_OBJ))) { value_str = CPLSPrintf("(object reference list size %lld)", (long long)n_points); }
-         else { value_str = CPLSPrintf("(array attribute type %d size %lld)", type_class, (long long)n_points); }
-        bValueSet = true;
-    } else { // Other unhandled scalar types
-        value_str = CPLSPrintf("(unhandled scalar type class %d)", type_class);
-        bValueSet = true;
-    }
-
-    // Add NAME=VALUE to CSL list if value was obtained
-    if (bValueSet) {
-        *(data->ppapszList) = CSLSetNameValue(*(data->ppapszList), attr_name, value_str.c_str());
-    } else { // Should only happen if H5Aread failed AND didn't log/set value_str
-        *(data->ppapszList) = CSLSetNameValue(*(data->ppapszList), attr_name, "(Error reading attribute)");
-    }
-
-// Cleanup label
-attr_cleanup:
-    if (attr_type >= 0) H5Tclose(attr_type);
-    if (attr_space >= 0) H5Sclose(attr_space);
-    if (attr_id >= 0) H5Aclose(attr_id);
-    return 0; // Continue H5Aiterate iteration
-}
 
 /************************************************************************/
 /* ==================================================================== */
