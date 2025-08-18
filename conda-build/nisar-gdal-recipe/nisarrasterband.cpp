@@ -72,15 +72,17 @@ NisarRasterBand::NisarRasterBand( NisarDataset *poDSIn, int nBandIn ) :
     {
         if (H5Pget_layout(dcpl_id) == H5D_CHUNKED)
         {
-            int rank = H5Sget_simple_extent_ndims(poGDS->hDataset);
-            if (rank >= 2)
-            {
-                std::vector<hsize_t> chunk_dims(rank);
-                if (H5Pget_chunk(dcpl_id, rank, chunk_dims.data()) == rank)
-                {
-                    this->nBlockXSize = static_cast<int>(chunk_dims[rank - 1]);
-                    this->nBlockYSize = static_cast<int>(chunk_dims[rank - 2]);
+            hid_t hSpace = H5Dget_space(hDatasetID);
+            if (hSpace >= 0) {
+                int rank = H5Sget_simple_extent_ndims(hSpace);
+                if (rank >= 2) {
+                    std::vector<hsize_t> chunk_dims(rank);
+                    if (H5Pget_chunk(dcpl_id, rank, chunk_dims.data()) == rank) {
+                        this->nBlockXSize = static_cast<int>(chunk_dims[rank - 1]);
+                        this->nBlockYSize = static_cast<int>(chunk_dims[rank - 2]);
+                    }
                 }
+                H5Sclose(hSpace);
             }
         }
         H5Pclose(dcpl_id);
