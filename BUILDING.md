@@ -123,6 +123,15 @@ RUN dnf update -y && \
     dnf clean all && \
     rm -rf /var/cache/dnf/*
 
+# Download and install the AWS CLI v2
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && \
+    ./aws/install && \
+    rm -rf awscliv2.zip aws
+
+# Verify the installation
+CMD ["aws", "--version"]
+
 # Install a specific version of Miniconda with Python 3.11
 RUN wget "https://repo.anaconda.com/miniconda/Miniconda3-py311_24.5.0-0-Linux-x86_64.sh" -O ~/miniconda.sh && \
     /bin/bash ~/miniconda.sh -b -p /opt/conda && \
