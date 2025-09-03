@@ -116,6 +116,7 @@ RUN dnf update -y && \
     dnf install -y \
       glibc \
       wget \
+      unzip \
       bzip2 \
       make \
       gcc-c++ \
