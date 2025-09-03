@@ -192,7 +192,7 @@ Building for `linux-64` on a Mac requires using Docker.
 
     ```bash
     # Start the container with this project's directory mounted
-    docker run --rm -it -v "$(pwd)":/build_space conda-builder
+    docker run --platform linux/amd64 --rm -it -v "$(pwd)":/build_space conda-builder
 
     # Once inside the container's shell, run the build
     conda build . --output-folder /build_space/conda-bld
