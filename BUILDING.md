@@ -131,7 +131,7 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
     rm -rf awscliv2.zip aws
 
 # Verify the installation
-CMD ["aws", "--version"]
+RUN aws --version
 
 # Install a specific version of Miniconda with Python 3.11
 RUN wget "https://repo.anaconda.com/miniconda/Miniconda3-py311_24.5.0-0-Linux-x86_64.sh" -O ~/miniconda.sh && \
