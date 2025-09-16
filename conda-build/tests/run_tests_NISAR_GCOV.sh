@@ -6,27 +6,35 @@ set -e
 # Configuration
 PACKAGE_NAME="gdal-driver-nisar"
 CONDA_ENV_NAME="nisar-test-suite"
-S3_FILE_PATH="s3://bucket/NISAR_L2_PR_GCOV_001_030_A_019_2800_SHNA_A_20081012T060911_20081012T060925_D00404_N_F_J_001.h5"
-GDAL_S3_PATH="/vsis3/${S3_FILE_PATH#s3://}"
+
+# Subdatasets and output file names
 SUBDATASET_NETCDF="science/LSAR/GCOV/grids/frequencyA/HHHH"
 SUBDATASET_NISAR="/${SUBDATASET_NETCDF}"
 OUTPUT_COG_NISAR="output_nisar_driver.tif"
 OUTPUT_REPROJECT_TIF="output_nisar_reproject.tif"
 OUTPUT_COG_NETCDF="output_netcdf_driver.tif"
 OUTPUT_MULTIBAND_TIF="output_nisar_multiband.tif"
+# End Configuration
 
 # Helper for printing colored output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-# AWS Credentials (from profile)
-if [ -z "$1" ]; then
-    echo -e "${RED}Usage: $0 <aws-profile-name>${NC}"
+# Argument Parsing
+if [ -z "$2" ]; then
+    echo -e "${RED}Usage: $0 <aws-profile-name> <s3-file-path>${NC}"
+    echo "Example: $0 my-profile s3://my-bucket/path/to/file.h5"
     exit 1
 fi
 PROFILE="$1"
+S3_FILE_PATH="$2" # Assign S3_FILE_PATH from the second argument
+#
 
+# Derived path variables
+GDAL_S3_PATH="/vsis3/${S3_FILE_PATH#s3://}"
+
+# AWS Credentials (from profile)
 echo "Fetching AWS credentials from profile: ${PROFILE}"
 
 export AWS_REGION=$(aws --profile "${PROFILE}" configure get region)
@@ -45,7 +53,7 @@ fi
 # Construct HTTPS URL for standard drivers
 S3_BUCKET=$(echo "${S3_FILE_PATH}" | cut -d/ -f3)
 S3_KEY=$(echo "${S3_FILE_PATH}" | cut -d/ -f4-)
-HTTPS_URL="https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${S3_KEY}"
+HTTPS_URL="https://${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${S_KEY}"
 
 
 # Performance Tuning Environment Variables
@@ -103,7 +111,8 @@ fi
 
 # Test 2.3: Direct Raster Access
 echo -n "  - Test 2.3: Opening a specific subdataset... "
-if gdalinfo "NISAR:${GDAL_S3_PATH}:${SUBDATASET_NISAR}" | grep "Size is 4545, 6220"; then
+# The specific size check might need adjustment if you test with different files.
+if gdalinfo "NISAR:${GDAL_S3_PATH}:${SUBDATASET_NISAR}" | grep "Size is"; then
     echo -e "${GREEN}PASSED${NC}"
 else
     echo -e "${RED}FAILED${NC}"
@@ -174,7 +183,7 @@ echo
 echo "STEP 3: Running performance comparison..."
 
 # Test 3.1: Time NISAR driver
-echo -n "  - Test 3.1: Timing your NISAR driver... "
+echo -n "  - Test 3.1: Timing NISAR driver
 REAL_TIME=$( { time gdal_translate -q -of COG "NISAR:${GDAL_S3_PATH}:${SUBDATASET_NISAR}" "$OUTPUT_COG_NISAR" > /dev/null 2>&1; } 2>&1 | grep real | awk '{print $2}' )
 echo -e "${GREEN}Finished in ${REAL_TIME}${NC}"
 
