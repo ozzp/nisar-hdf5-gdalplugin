@@ -100,10 +100,10 @@ The test suite reveals critical differences in how the drivers handle NISAR data
 
 | Access | Driver | Result & Analysis |
 | :--- | :--- | :--- |
-| **Cloud (S3)** | `gdal-driver-nisar` | **SUCCESS**. The only driver that correctly handles AWS session credentials to access the remote file. Its use of the HDF5 ROS3 VFD is efficient for cloud object storage. |
-| **Cloud (S3)** | Standard `netCDF` / `HDF5` | **FAILURE**. Both drivers fail with `HTTP 403 Forbidden` errors. Their underlying `/vsicurl/` access method does not properly handle the temporary AWS credentials required for authentication. |
-| **Local File** | `gdal-driver-nisar` | **SUCCESS (Fastest)**. Consistently outperforms the standard drivers, proving its parsing and processing logic is highly optimized for the NISAR data structure. |
-| **Local File** | Standard `netCDF` | **SUCCESS (Slower)**. Able to read the local file correctly but is measurably slower than the specialized NISAR driver. |
-| **Local File** | Standard `HDF5` | **SUCCESS (Slowest)**. While functional with the correct subdataset syntax, it is the least performant of the three, likely due to its generic parsing approach. |
+| **Cloud (S3)** | `gdal-driver-nisar` | **SUCCESS**. Driver correctly handles AWS session credentials to access the remote file. Uses HDF5 ROS3 VFD for efficient cloud object storage read access. |
+| **Cloud (S3)** | Standard `netCDF` / `HDF5` | **FAILURE**. Both drivers fail with `HTTP 403 Forbidden` errors. Likely due to underlying `/vsicurl/` access method not properly handling the temporary AWS credentials required for authentication. |
+| **Local File** | `gdal-driver-nisar` | **SUCCESS (Fastest)**. Consistently outperforms the standard drivers, proving its parsing and processing implementation is optimized for the NISAR data structure. |
+| **Local File** | Standard `netCDF` | **SUCCESS (Slower)**. Able to read the local file correctly but is measurably slower than the NISAR driver. |
+| **Local File** | Standard `HDF5` | **SUCCESS (Slowest)**. While functional with the correct subdataset syntax, it is the least performant of the three. |
 
-**Overall Conclusion**: The `gdal-driver-nisar` is essential for reliable and performant access to cloud-hosted NISAR data and remains the most efficient option for local files.
+**Overall Conclusion**: The `gdal-driver-nisar` provides reliable and performant access to cloud-hosted NISAR data and remains the most efficient option for local files.
