@@ -18,8 +18,39 @@
 
 #include "cpl_port.h"
 #include "cpl_conv.h"
+#include "cpl_time.h"
 #include "nisar_priv.h"
 #include "H5FDros3.h" // For H5FD_ros3_fapl_t and H5FD_CURR_ROS3_FAPL_T_VERSION
+
+static std::string ReadStringAttribute(hid_t hLocation, const char* pszAttrName)
+{
+    hid_t hAttr = H5Aopen(hLocation, pszAttrName, H5P_DEFAULT);
+    if (hAttr < 0) return "";
+
+    std::string attr_val = "";
+    hid_t hAttrType = H5Aget_type(hAttr);
+    if (hAttrType >= 0)
+    {
+        if (H5Tis_variable_str(hAttrType) > 0) {
+            char *pszVal = nullptr;
+            if (H5Aread(hAttr, hAttrType, &pszVal) >= 0 && pszVal) {
+                attr_val = pszVal;
+                H5free_memory(pszVal);
+            }
+        } else { // Fixed-length string
+            size_t nSize = H5Tget_size(hAttrType);
+            char *pszVal = (char *)CPLMalloc(nSize + 1);
+            if (H5Aread(hAttr, hAttrType, pszVal) >= 0) {
+                pszVal[nSize] = '\0';
+                attr_val = pszVal;
+            }
+            CPLFree(pszVal);
+        }
+        H5Tclose(hAttrType);
+    }
+    H5Aclose(hAttr);
+    return attr_val;
+}
 
 // Forward declaration for the helper function
 static std::string get_hdf5_object_name(hid_t hObjID);
@@ -243,6 +274,47 @@ static herr_t NISAR_FindDatasetsVisitor(hid_t obj_id /* ID of object being visit
     }
 
     return H5_ITER_CONT; // Continue iteration
+}
+
+static bool Read1DDoubleVec(hid_t hFile, const char* pszPath, std::vector<double>& vec)
+{
+    hid_t hDset = H5Dopen2(hFile, pszPath, H5P_DEFAULT);
+    if (hDset < 0) {
+        CPLError(CE_Warning, CPLE_FileIO, "Failed to open dataset: %s", pszPath);
+        return false;
+    }
+
+    hid_t hSpace = H5Dget_space(hDset);
+    int nDims = H5Sget_simple_extent_ndims(hSpace);
+    hsize_t dims[1];
+    H5Sget_simple_extent_dims(hSpace, dims, nullptr);
+
+    if (nDims != 1 || dims[0] == 0) {
+        CPLError(CE_Warning, CPLE_AppDefined, "Dataset %s is not a non-empty 1D array.", pszPath);
+        H5Sclose(hSpace);
+        H5Dclose(hDset);
+        return false;
+    }
+
+    try {
+        vec.resize(dims[0]);
+    } catch (const std::bad_alloc&) {
+        CPLError(CE_Failure, CPLE_OutOfMemory, "Failed to allocate memory for %s", pszPath);
+        H5Sclose(hSpace);
+        H5Dclose(hDset);
+        return false;
+    }
+
+    herr_t status = H5Dread(hDset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, vec.data());
+
+    H5Sclose(hSpace);
+    H5Dclose(hDset);
+
+    if (status < 0) {
+        CPLError(CE_Warning, CPLE_FileIO, "Failed to read data from %s", pszPath);
+        return false;
+    }
+    return true;
 }
 
 GDALDataType NisarDataset::GetGDALDataType(hid_t hH5Type)
@@ -1090,6 +1162,84 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     }
     CPLDebug("NISAR_DRIVER", "Successfully RE-opened HDF5 file handle with optimized FAPL: %s", filenameForH5Fopen);
 
+    // PRODUCT LEVEL DETECTION (GENERALIZED)
+    bool isLevel1 = false;
+    bool isLevel2 = false;
+    std::string productType = "";
+    std::string productLevelGroup = "";
+
+    // First, try to read the productType dataset for an explicit definition.
+    hid_t hIdentGroup = H5Gopen2(hHDF5, "/science/LSAR/identification", H5P_DEFAULT);
+    if (hIdentGroup >= 0)
+    {
+        CPLDebug("NISAR_DRIVER", "Successfully opened /science/LSAR/identification group.");
+        hid_t hDset = H5Dopen2(hIdentGroup, "productType", H5P_DEFAULT);
+        if(hDset >= 0) {
+            hid_t hStrType = H5Dget_type(hDset);
+            if (hStrType >= 0) {
+                // This logic correctly handles both fixed and variable-length strings
+                if (H5Tis_variable_str(hStrType) > 0) {
+                    char* pszVal = nullptr;
+                    if (H5Dread(hDset, hStrType, H5S_ALL, H5S_ALL, H5P_DEFAULT, &pszVal) >= 0 && pszVal) {
+                        productType = pszVal;
+                        H5free_memory(pszVal);
+                    }
+                } else {
+                    size_t nSize = H5Tget_size(hStrType);
+                    if (nSize > 0) {
+                        char* pszVal = (char *)CPLMalloc(nSize + 1);
+                        if (H5Dread(hDset, hStrType, H5S_ALL, H5S_ALL, H5P_DEFAULT, pszVal) >= 0) {
+                            pszVal[nSize] = '\0';
+                            productType = pszVal;
+                        }
+                        CPLFree(pszVal);
+                    }
+                }
+                H5Tclose(hStrType);
+            }
+            H5Dclose(hDset);
+        }
+        H5Gclose(hIdentGroup);
+    }
+
+    // Now, use the result of our search to set the flags and the product group name.
+    if (!productType.empty()) {
+        CPLDebug("NISAR_DRIVER", "Read productType: %s", productType.c_str());
+        if (productType == "RSLC" || productType == "RIFG" || productType == "RUNW") {
+            isLevel1 = true;
+            productLevelGroup = productType; // Use the actual product type for path building
+        }
+        else if (productType == "GSLC" || productType == "GUNW" ||
+                 productType == "GOFF" || productType == "GCOV") {
+            isLevel2 = true;
+            productLevelGroup = productType; // Use the actual product type for path building
+        }
+    }
+    // If we couldn't read productType, fall back to checking for common group paths.
+    else {
+        CPLDebug("NISAR_DRIVER", "Could not determine productType. Falling back to path-based detection.");
+        
+	// Temporarily disable HDF5 error printing for these checks
+	H5E_auto2_t old_func;
+	void *old_client_data;
+	H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+	H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+        if (H5Lexists(hHDF5, "/science/LSAR/RSLC", H5P_DEFAULT) > 0) {
+            isLevel1 = true;
+            productLevelGroup = "RSLC";
+        } else if (H5Lexists(hHDF5, "/science/LSAR/GSLC", H5P_DEFAULT) > 0) {
+            isLevel2 = true;
+            productLevelGroup = "GSLC";
+        } else if (H5Lexists(hHDF5, "/science/LSAR/GCOV", H5P_DEFAULT) > 0) {
+            isLevel2 = true;
+            productLevelGroup = "GCOV";
+        }
+        // NOTE: Add other checks for RIFG, GUNW, etc.
+
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore error handler
+    }
+
     // *********************************************************************
     // ** IMPORTANT AWS AUTHENTICATION FOR ROS3 VFD:                      **
     // ** This driver relies on the HDF5 ROS3 VFD picking up AWS          **
@@ -1269,6 +1419,8 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
          else { CPLDebug("NISAR_DRIVER", "Set HDF5 chunk cache: slots=%lu, size=%lu bytes (%.0f MB), w0=%.2f", (unsigned long)new_nslots, (unsigned long)new_nbytes, (double)new_cache_size_mb, rdcc_w0); }
     } else { CPLError(CE_Warning, CPLE_AppDefined, "Failed to copy default DAPL."); dapl_id = H5P_DEFAULT; }
 
+    
+
     // Open Target HDF5 Dataset
     CPLDebug("NISAR_DRIVER", "Attempting to open HDF5 dataset: %s", pathToOpen);
     hDataset = H5Dopen2( hHDF5, pathToOpen, dapl_id ); //Use configured dapl_id
@@ -1373,6 +1525,21 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     }
     CPLDebug("NISAR_DRIVER", "Dataset Dimensions: %d x %d", poDS->nRasterXSize, poDS->nRasterYSize);
 
+    if (isLevel2) {
+        CPLDebug("NISAR_DRIVER", "Level 2 product detected. Georeferencing will use GeoTransform and SRS.");
+    }
+    else if (isLevel1) {
+        CPLDebug("NISAR_DRIVER", "Level 1 product detected. Will generate GCPs for georeferencing.");
+        // Pass the discovered product group to the function
+        if (poDS->GenerateGCPsFromGeolocationGrid(productLevelGroup.c_str()) != CE_None) {
+            CPLError(CE_Warning, CPLE_AppDefined, "Failed to generate GCPs for Level 1 product.");
+            // Decide if this should be a fatal error or just a warning
+        }
+    }
+    else {
+        CPLError(CE_Warning, CPLE_AppDefined, "Unknown NISAR product structure. Georeferencing may be absent.");
+    }
+
     // Determine Band Count
     if (GDALDataTypeIsComplex(poDS->eDataType)) {
        poDS->nBands = 1; // Convention: Represent complex as one GDAL band
@@ -1381,6 +1548,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
        poDS->nBands = 1; // Default for non-complex types
        CPLDebug("NISAR_DRIVER", "Data type is not complex, setting Band Count to: %d", poDS->nBands);
     }
+
     // Note: Further logic may be needed for other multi-component datasets if supported later.
 
        // Create raster bands
@@ -1420,6 +1588,15 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
 CPLErr NisarDataset::GetGeoTransform( double * padfTransform )
 {
     CPLDebug("NISAR_DRIVER", "NisarDataset::GetGeoTransform() called.");
+
+    if (GetGCPCount() > 0)
+    {
+        // If we have GCPs, return the default "not found" transform.
+        // GDAL will use the GCPs instead.
+        return GDALPamDataset::GetGeoTransform(padfTransform); // This returns the default failure case
+    }
+
+    CPLDebug("NISAR_DRIVER", "NisarDataset::GetGeoTransform() Initialize output. ");
 
     // Initialize output and local variables
     // Default identity transform (required by GDAL if specific transform not found)
@@ -1659,6 +1836,12 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     // Temporary pointer for newly created SRS object during processing
     OGRSpatialReference *poTmpSRS = nullptr;
 
+    // ADD ERROR SUPPRESSION
+    H5E_auto2_t old_func;
+    void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
     // Determine Path to Projection Info
     // Need to find the group containing the main dataset first
     if (this->hDataset < 0) {
@@ -1677,16 +1860,21 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     else if (lastSlash != nullptr) { groupPath = datasetPath.substr(0, lastSlash - datasetPath.c_str()); if(groupPath.empty()) groupPath = "/"; }
     else { groupPath = "/"; } // Fallback? Should error?
 
-    // *** IMPORTANT: Verify dataset name ("projection") from NISAR Spec ***
+    // IMPORTANT: Verify dataset name ("projection") from NISAR Spec
     projectionPath = groupPath + (groupPath == "/" ? "" : "/") + "projection";
     CPLDebug("NISAR_DRIVER", "Attempting to open projection dataset: %s", projectionPath.c_str());
 
     // Open the Projection "Dataset" (often just holds attributes)
     hProjectionDataset = H5Dopen2( this->hHDF5, projectionPath.c_str(), H5P_DEFAULT );
     if (hProjectionDataset < 0) {
-        CPLError(CE_Warning, CPLE_OpenFailed, "GetSpatialRef: Failed to open projection dataset: '%s'. No SRS available.", projectionPath.c_str());
+        //No CPLError here, as this is expected for all L1 products
+        //CPLError(CE_Warning, CPLE_OpenFailed, "GetSpatialRef: Failed to open projection dataset: '%s'. No SRS available.", projectionPath.c_str());
+        CPLDebug("NISAR_DRIVER", "GetSpatialRef: Optional 'projection' dataset not found for this product, this is expected for Level 1 Product.");
         goto cleanup; // Go directly to cleanup, will return nullptr
     }
+
+    // RESTORE ERROR HANDLER
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
 
     // Try Reading EPSG Code Attribute
     hAttribute = H5Aopen(hProjectionDataset, "epsg_code", H5P_DEFAULT);
@@ -1830,4 +2018,405 @@ cleanup:
 
     // Mutex is automatically unlocked when holderD goes out of scope
     return m_poSRS; // Return pointer to the cached member variable (const*)
+}
+
+/**
+ * Reads a 2D slice from a 3D HDF5 dataset into a 1D vector using hyperslab selection.
+ *
+ * This function is designed to extract a 2D plane of data from a 3D cube, which is
+ * necessary for handling NISAR's geolocation grids that are structured as
+ * (height, azimuth_time, slant_range).
+ *
+ * @param hLocation The hid_t of the file or group containing the dataset.
+ * @param pszPath The name of the 3D dataset to read from.
+ * @param vec The output std::vector<double> where the flattened 2D slice will be stored.
+ * @param nSliceIndex The index of the slice to extract from the first dimension (height).
+ * @return `true` on success, `false` on failure.
+ */
+static bool Read2DSliceAsVec(hid_t hLocation, const char* pszPath,
+                             std::vector<double>& vec, int nSliceIndex = 0)
+{
+    hid_t hDset = -1;
+    hid_t hFileSpace = -1;
+    hid_t hMemSpace = -1;
+    bool bSuccess = false;
+    hsize_t dims[3];
+    hsize_t offset[3];
+    hsize_t count[3];
+    hsize_t mem_dims[2];
+
+    hDset = H5Dopen2(hLocation, pszPath, H5P_DEFAULT);
+    if (hDset < 0) {
+        CPLError(CE_Warning, CPLE_FileIO, "Failed to open dataset: %s", pszPath);
+        goto cleanup;
+    }
+
+    hFileSpace = H5Dget_space(hDset);
+    if (hFileSpace < 0) {
+        CPLError(CE_Warning, CPLE_AppDefined, "Failed to get filespace for: %s", pszPath);
+        goto cleanup;
+    }
+
+    if (H5Sget_simple_extent_ndims(hFileSpace) != 3) {
+        CPLError(CE_Warning, CPLE_AppDefined, "Dataset '%s' is not 3-dimensional as expected for a metadata cube.", pszPath);
+        goto cleanup;
+    }
+
+    H5Sget_simple_extent_dims(hFileSpace, dims, nullptr); // Get dims: [height, azimuth, range]
+
+    if (nSliceIndex < 0 || static_cast<hsize_t>(nSliceIndex) >= dims[0]) {
+        CPLError(CE_Warning, CPLE_AppDefined, "Slice index %d is out of bounds for dataset: %s", nSliceIndex, pszPath);
+        goto cleanup;
+    }
+
+    // Hyperslab Selection in the File
+    // Define the starting offset of our slice in the 3D cube [height, azimuth, range].
+    offset[0] = static_cast<hsize_t>(nSliceIndex);
+    offset[1] = 0;
+    offset[2] = 0;
+
+    // Define the size of the block to read: 1 slice in height, all of azimuth, all of range.
+    count[0] = 1;
+    count[1] = dims[1];
+    count[2] = dims[2];   
+
+    if (H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr) < 0) {
+        CPLError(CE_Warning, CPLE_AppDefined, "Failed to select hyperslab for: %s", pszPath);
+        goto cleanup;
+    }
+
+    // Dataspace in Memory
+    // Create a 2D dataspace for memory that matches the dimensions of our slice [azimuth, range].
+    mem_dims[0] = dims[1];
+    mem_dims[1] = dims[2];
+    hMemSpace = H5Screate_simple(2, mem_dims, nullptr);
+    if (hMemSpace < 0) {
+        CPLError(CE_Warning, CPLE_AppDefined, "Failed to create memory space for slice.");
+        goto cleanup;
+    }
+
+    try {
+        vec.resize(dims[1] * dims[2]);
+    } catch (const std::bad_alloc&) {
+        CPLError(CE_Failure, CPLE_OutOfMemory, "Failed to allocate memory for slice from %s", pszPath);
+        goto cleanup;
+    }
+
+    if (H5Dread(hDset, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, vec.data()) < 0) {
+        CPLError(CE_Warning, CPLE_FileIO, "Failed to read data slice from %s", pszPath);
+        vec.clear();
+        goto cleanup;
+    }
+
+    bSuccess = true;
+
+cleanup:
+    if (hMemSpace >= 0) H5Sclose(hMemSpace);
+    if (hFileSpace >= 0) H5Sclose(hFileSpace);
+    if (hDset >= 0) H5Dclose(hDset);
+    return bSuccess;
+}
+
+// Helper to read a string attribute from an HDF5 object
+static std::string ReadH5StringAttribute(hid_t hObjectID, const char* pszAttrName)
+{
+    if( H5Aexists(hObjectID, pszAttrName) <= 0 ) return "";
+    hid_t hAttr = H5Aopen_name(hObjectID, pszAttrName);
+    if( hAttr < 0 ) return "";
+
+    std::string strVal;
+    hid_t hAttrType = H5Aget_type(hAttr);
+    hid_t hAttrSpace = H5Aget_space(hAttr);
+    if( H5Sget_simple_extent_npoints(hAttrSpace) == 1 )
+    {
+        size_t nSize = H5Aget_storage_size(hAttr);
+        char* pszVal = new char[nSize + 1];
+        if (H5Aread(hAttr, hAttrType, pszVal) >= 0)
+        {
+            pszVal[nSize] = '\0';
+            strVal = pszVal;
+        }
+        delete[] pszVal;
+    }
+    
+    H5Sclose(hAttrSpace);
+    H5Tclose(hAttrType);
+    H5Aclose(hAttr);
+    return strVal;
+}
+
+CPLErr NisarDataset::GenerateGCPsFromGeolocationGrid(const char* pszProductGroup) {
+
+    // DECLARE ALL VARIABLES AT THE TOP
+    CPLErr eErr = CE_Failure;
+    hid_t hGridGroup = -1;
+    hid_t hAttr = -1;
+    hid_t hScalarDset = -1;
+    OGRSpatialReference *poCRS = nullptr;
+    std::vector<GDAL_GCP> gcp_list;
+    char *pszStartTimeStr = nullptr;
+
+    hid_t hEpsgDset;
+    long long epsg_code = 0;
+    std::vector<double> x_coords, y_coords, slant_ranges, azimuth_times;
+    double startingRange = 0.0, rangePixelSpacing = 0.0, prf = 0.0, scene_start_time = 0.0;
+    double gcp_unix_time;
+
+    double time_epoch = 0.0;
+    hid_t hAzimuthTimeDset = -1;
+    std::string time_units;
+    int nEpochYear, nEpochMonth, nEpochDay, nEpochHour, nEpochMin, nEpochSec;
+    struct tm epoch_tm;
+
+    hid_t hSlantRangeDset = -1;
+    hid_t hMemSpace = -1;
+    hid_t hFileSpace = -1;
+    hid_t hStrType = -1;
+
+    hsize_t mem_dims[1];
+    hsize_t offset[1];
+    hsize_t count[1];
+
+    bool bStartTimeAllocatedByHDF5 = false;
+    
+    // Declare all path strings here, before any potential 'goto' calls
+    const char* pszStartTimePath = "/science/LSAR/identification/zeroDopplerStartTime";
+    std::string sGridPath = CPLSPrintf("/science/LSAR/%s/metadata/geolocationGrid", pszProductGroup);
+    std::string sStartingRangePath = CPLSPrintf("/science/LSAR/%s/swaths/frequencyA/startingRange", pszProductGroup);
+    std::string sSlantRangeSpacingPath = CPLSPrintf("/science/LSAR/%s/swaths/frequencyA/slantRangeSpacing", pszProductGroup);
+    std::string sPulseRepetitionFrequencyPath = CPLSPrintf("/science/LSAR/%s/swaths/frequencyA/nominalAcquisitionPRF", pszProductGroup);
+    std::string sSlantRangePath = CPLSPrintf("/science/LSAR/%s/swaths/frequencyA/slantRange", pszProductGroup);
+
+
+    // Open the geolocationGrid group
+    hGridGroup = H5Gopen2(hHDF5, sGridPath.c_str(), H5P_DEFAULT);
+    if (hGridGroup < 0) {
+        CPLError(CE_Failure, CPLE_FileIO, "Could not open geolocationGrid group at %s", sGridPath.c_str());
+        goto cleanup;
+    }
+
+    // Read the EPSG code from the scalar DATASET
+    hEpsgDset = H5Dopen2(hGridGroup, "epsg", H5P_DEFAULT);
+    if (hEpsgDset < 0) {
+        CPLError(CE_Failure, CPLE_AppDefined, "Failed to open 'epsg' dataset in geolocationGrid.");
+        goto cleanup;
+    }
+
+    // Use H5T_NATIVE_INT to match the Int32 spec. Reading into a long long is safe.
+    if (H5Dread(hEpsgDset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, &epsg_code) < 0 || epsg_code <= 0) {
+        CPLError(CE_Failure, CPLE_AppDefined, "Failed to read a valid EPSG code from 'epsg' dataset.");
+        //H5Dclose(hEpsgDset); // Close handle even on read failure
+        goto cleanup;
+    }
+
+    //H5Dclose(hEpsgDset); // Close handle on success
+    CPLDebug("NISAR_DRIVER", "Read EPSG code %lld from dataset.", epsg_code);
+
+
+    // Read the grid vectors into memory
+    if (!Read2DSliceAsVec(hGridGroup, "coordinateX", x_coords) ||
+        !Read2DSliceAsVec(hGridGroup, "coordinateY", y_coords) ||
+        !Read1DDoubleVec(hGridGroup, "slantRange", slant_ranges) ||
+        !Read1DDoubleVec(hGridGroup, "zeroDopplerTime", azimuth_times)) {
+        CPLError(CE_Failure, CPLE_AppDefined, "Failed to read one or more geolocation grid datasets.");
+        goto cleanup;
+    }
+    CPLDebug("NISAR_DRIVER", "Read geolocation grid arrays. Azimuth points: %zu, Range points: %zu",
+             azimuth_times.size(), slant_ranges.size());
+
+    // Get the time epoch for the azimuth grid
+    time_epoch = 0.0;
+    hAzimuthTimeDset = H5Dopen2(hGridGroup, "zeroDopplerTime", H5P_DEFAULT);
+    if( hAzimuthTimeDset < 0 ) {
+        CPLError(CE_Failure, CPLE_FileIO, "Failed to open geolocationGrid/zeroDopplerTime dataset.");
+        goto cleanup;
+    }
+    time_units = ReadH5StringAttribute(hAzimuthTimeDset, "units");
+    //H5Dclose(hAzimuthTimeDset);
+
+    if( sscanf(time_units.c_str(), "seconds since %d-%d-%d %d:%d:%d",
+               &nEpochYear, &nEpochMonth, &nEpochDay, &nEpochHour, &nEpochMin, &nEpochSec) == 6)
+    {
+        struct tm epoch_tm;
+        memset(&epoch_tm, 0, sizeof(epoch_tm));
+        epoch_tm.tm_year = nEpochYear - 1900;
+        epoch_tm.tm_mon = nEpochMonth - 1;
+        epoch_tm.tm_mday = nEpochDay;
+        epoch_tm.tm_hour = nEpochHour;
+        epoch_tm.tm_min = nEpochMin;
+        epoch_tm.tm_sec = nEpochSec;
+        time_epoch = static_cast<double>(CPLYMDHMSToUnixTime(&epoch_tm));
+    } else {
+        CPLError(CE_Failure, CPLE_AppDefined, "Could not parse time epoch from units: %s", time_units.c_str());
+        goto cleanup;
+    }
+
+    // Read scalar parameters for pixel/line conversion
+
+    // Read the first value from the "slantRange" array dataset
+    hSlantRangeDset = H5Dopen2(hHDF5, sSlantRangePath.c_str(), H5P_DEFAULT);
+    if (hSlantRangeDset < 0) {
+        CPLError(CE_Failure, CPLE_FileIO, "Failed to open 'slantRange' dataset.");
+        goto cleanup;
+    }
+
+    // Create a memory space for a single double value
+    mem_dims[0] = 1;
+    hMemSpace = H5Screate_simple(1, mem_dims, nullptr);
+    if (hMemSpace < 0) {
+        CPLError(CE_Failure, CPLE_AppDefined, "Failed to create memory space for 'slantRange' read.");
+        goto cleanup;
+    }
+
+    // Select the first element from the file's dataspace
+    hFileSpace = H5Dget_space(hSlantRangeDset);
+    if (hFileSpace < 0) {
+        CPLError(CE_Failure, CPLE_AppDefined, "Failed to get filespace for 'slantRange' dataset.");
+        goto cleanup;
+    }
+    offset[0] = 0;
+    count[0] = 1;
+    H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+
+    // Read the single value
+    if (H5Dread(hSlantRangeDset, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &startingRange) < 0) {
+        CPLError(CE_Failure, CPLE_FileIO, "Failed to read first element from 'slantRange' dataset.");
+        goto cleanup;
+    }
+
+    CPLDebug("NISAR_DRIVER", "Read startingRange: %.10g", startingRange);
+
+    // Read slantRangeSpacing
+    hScalarDset = H5Dopen2(hHDF5, sSlantRangeSpacingPath.c_str(), H5P_DEFAULT);
+    if(hScalarDset < 0) { CPLError(CE_Failure, CPLE_FileIO, "Failed to open slantRangeSpacing."); goto cleanup; }
+    if(H5Dread(hScalarDset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &rangePixelSpacing) < 0) {
+        CPLError(CE_Failure, CPLE_FileIO, "Failed to read slantRangeSpacing."); goto cleanup;
+    }
+    //H5Dclose(hScalarDset); 
+    //hScalarDset = -1;
+
+    // Read processedPulseRepetitionFrequency
+    hScalarDset = H5Dopen2(hHDF5, sPulseRepetitionFrequencyPath.c_str(), H5P_DEFAULT);
+    if(hScalarDset < 0) { CPLError(CE_Failure, CPLE_FileIO, "Failed to open processedPulseRepetitionFrequency."); goto cleanup; }
+    if(H5Dread(hScalarDset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &prf) < 0) {
+        CPLError(CE_Failure, CPLE_FileIO, "Failed to read processedPulseRepetitionFrequency."); goto cleanup;
+    }
+    //H5Dclose(hScalarDset); 
+    //hScalarDset = -1;
+
+    // Read and parse the Scene Start Time STRING
+    hScalarDset = H5Dopen2(hHDF5, pszStartTimePath, H5P_DEFAULT);
+    if (hScalarDset >= 0) {
+        hStrType = H5Dget_type(hScalarDset);
+        if (hStrType >= 0) {
+            if (H5Tis_variable_str(hStrType) > 0) { // Handle variable-length
+                // NOTE: This H5Dread allocates memory that must be freed with H5free_memory
+                H5Dread(hScalarDset, hStrType, H5S_ALL, H5S_ALL, H5P_DEFAULT, &pszStartTimeStr);
+                if(pszStartTimeStr != nullptr) {
+                    bStartTimeAllocatedByHDF5 = true;
+                }
+            } else { //Handle fixed-length
+                size_t nSize = H5Tget_size(hStrType);
+                if (nSize > 0) {
+                    // Allocate with CPLMalloc, free with CPLFree in cleanup block
+                    pszStartTimeStr = (char *)CPLMalloc(nSize + 1);
+                    if (H5Dread(hScalarDset, hStrType, H5S_ALL, H5S_ALL, H5P_DEFAULT, pszStartTimeStr) >= 0) {
+                        pszStartTimeStr[nSize] = '\0'; // Ensure null termination
+                    } else {
+                        CPLFree(pszStartTimeStr);
+                        pszStartTimeStr = nullptr; // Reset on failure
+                    }
+                }
+            }
+            //H5Tclose(hStrType);
+        }
+        //H5Dclose(hScalarDset);
+        //hScalarDset = -1;
+    }
+
+    if (pszStartTimeStr == nullptr || pszStartTimeStr[0] == '\0') {
+        CPLError(CE_Failure, CPLE_FileIO, "Failed to read a valid zeroDopplerStartTime string.");
+        goto cleanup;
+    }
+
+    int nYear, nMonth, nDay, nHour, nMin;
+    double dfSec;
+    if (sscanf(pszStartTimeStr, "%d-%d-%dT%d:%d:%lf",
+               &nYear, &nMonth, &nDay, &nHour, &nMin, &dfSec) == 6) {
+        struct tm brokendown_time;
+        memset(&brokendown_time, 0, sizeof(brokendown_time)); // Important: zero out the struct
+        brokendown_time.tm_year = nYear - 1900;
+        brokendown_time.tm_mon = nMonth - 1;
+        brokendown_time.tm_mday = nDay;
+        brokendown_time.tm_hour = nHour;
+        brokendown_time.tm_min = nMin;
+        scene_start_time = static_cast<double>(CPLYMDHMSToUnixTime(&brokendown_time)) + dfSec;
+        CPLDebug("NISAR_DRIVER", "Parsed start time %s to %f seconds since epoch.", pszStartTimeStr, scene_start_time);
+    } else {
+        CPLError(CE_Failure, CPLE_AppDefined, "Could not parse zeroDopplerStartTime string: %s", pszStartTimeStr);
+        goto cleanup;
+    }
+
+    // Create the CRS from the EPSG code
+    poCRS = new OGRSpatialReference();
+    if (poCRS->importFromEPSG(static_cast<int>(epsg_code)) != OGRERR_NONE) {
+        CPLError(CE_Failure, CPLE_AppDefined, "Failed to import EPSG:%lld.", epsg_code);
+        goto cleanup;
+    }
+    poCRS->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
+
+    // Build the GCP list
+    try {
+        gcp_list.reserve(azimuth_times.size() * slant_ranges.size());
+        for (size_t i = 0; i < azimuth_times.size(); ++i) {
+            for (size_t j = 0; j < slant_ranges.size(); ++j) {
+                GDAL_GCP gcp;
+                size_t grid_index = i * slant_ranges.size() + j;
+
+                gcp.dfGCPX = x_coords.at(grid_index);
+                gcp.dfGCPY = y_coords.at(grid_index);
+                gcp.dfGCPZ = 0.0;
+
+                gcp.dfGCPPixel = ((slant_ranges.at(j) - startingRange) / rangePixelSpacing) + 0.5;
+                // Convert grid azimuth time to Unix time before subtracting
+                gcp_unix_time = time_epoch + azimuth_times.at(i);
+                gcp.dfGCPLine = ((gcp_unix_time - scene_start_time) * prf) + 0.5;
+
+                gcp.pszId = CPLStrdup(CPLSPrintf("%zu", gcp_list.size() + 1));
+                gcp.pszInfo = CPLStrdup("");
+
+                gcp_list.push_back(gcp);
+            }
+        }
+    } catch (const std::exception& e) {
+        CPLError(CE_Failure, CPLE_AppDefined, "Exception while building GCP list: %s", e.what());
+        goto cleanup;
+    }
+
+    // Set the GCPs on the dataset
+    this->SetGCPs(gcp_list.size(), gcp_list.data(), poCRS);
+    CPLDebug("NISAR_DRIVER", "Successfully set %zu GCPs on the dataset.", gcp_list.size());
+    eErr = CE_None; // Success!
+
+cleanup:
+    // Clean up all resources
+    if (pszStartTimeStr) {
+        if (bStartTimeAllocatedByHDF5) {
+            H5free_memory(pszStartTimeStr);
+        } else {
+            CPLFree(pszStartTimeStr);
+        }
+    }
+    if (hScalarDset >= 0) H5Dclose(hScalarDset);
+    if (hGridGroup >= 0) H5Gclose(hGridGroup);
+    if (hEpsgDset >= 0) H5Dclose(hEpsgDset);
+    if (hSlantRangeDset >= 0) H5Dclose(hSlantRangeDset);
+    if (hMemSpace >= 0) H5Sclose(hMemSpace);
+    if (hFileSpace >= 0) H5Sclose(hFileSpace);
+    if (hStrType >= 0) H5Tclose(hStrType);
+    if (poCRS) poCRS->Release();
+
+    // The GCP list is now owned by the dataset, so we do NOT free it here.
+
+    return eErr;
 }

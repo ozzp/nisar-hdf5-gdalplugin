@@ -41,30 +41,24 @@ class NisarDataset : public GDALPamDataset
 {
     friend class NisarRasterBand;
 
-    // --- Core HDF5 Handles & Info (Declare first) ---
+    // Core HDF5 Handles & Info (Declare first)
     hid_t hHDF5 = -1;
     hid_t hDataset = -1;
     char *pszFilename = nullptr;
     GDALDataType eDataType = GDT_Unknown; // Has default initializer
     char **papszSubDatasets = nullptr;    // Has default initializer
 
-    // --- Caching Flags (Declare together) ---
+    // Caching Flags (Declare together)
     mutable bool m_bGotSRS = false; //Flag indicating if SRS was fetched
     mutable bool m_bGotGlobalMetadata = false;
     mutable bool m_bGotMetadata = false; // Flag for default domain HDF5 read
     // mutable bool m_bGotGeoTransform = false; // If caching GT
     //
-    // --- Cached Objects / Data (Declare together) ---
+    // Cached Objects / Data (Declare together)
     mutable OGRSpatialReference *m_poSRS = nullptr;   // Cached SRS object
     mutable char **m_papszGlobalMetadata = nullptr; // Cached list for global attrs
-    // mutable double m_adfGeoTransform[6]{0.0, 1.0, 0.0, 0.0, 0.0, 1.0}; // If caching GT
 
-    // GeoTransform Caching Members
-    // mutable double m_adfGeoTransform[6]{0.0, 1.0, 0.0, 0.0, 0.0, 1.0}; // Cached GT array
-    // mutable bool m_bGotGeoTransform = false; // Flag for GT
-    // mutable CPLMutex *m_hGeoTransformMutex = nullptr; // Mutex for GT
-
-    // --- Mutexes (Declare together, last among cached members) ---
+    // Mutexes (Declare together, last among cached members)
     mutable std::mutex m_SRSMutex;
     mutable std::mutex m_GlobalMetadataMutex;
     mutable std::mutex m_MetadataMutex;
@@ -87,6 +81,7 @@ class NisarDataset : public GDALPamDataset
     char **GetMetadata( const char * pszDomain = "") override;
     CPLErr GetGeoTransform( double * padfTransform ) override;
     const OGRSpatialReference *GetSpatialRef() const override;
+    CPLErr GenerateGCPsFromGeolocationGrid(const char* pszProductGroup);
 };
 
 #endif //NISAR_DATASET_H
