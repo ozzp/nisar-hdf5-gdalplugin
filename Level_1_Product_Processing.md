@@ -59,6 +59,7 @@ gdalwarp \
     -t_srs EPSG:4326 \
     -tps \
     -r cubic \
+    -srcwin 9380 2590 1000 1000 \
     -co COMPRESS=LZW \
     NISAR:"/Users/ozp/work/nisar/NISAR_L1_PR_RSLC_001_030_A_019_2000_SHNA_A_20081012T060910_20081012T060926_D00402_N_F_J_001.h5":/science/LSAR/RSLC/swaths/frequencyA/HH \
     output_cli.tif
