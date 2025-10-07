@@ -111,6 +111,12 @@ ENV LANG="C.UTF-8"
 ENV LC_ALL="C.UTF-8"
 ENV PATH="/opt/conda/bin:$PATH"
 
+# Explicitly tell GDAL where to find custom driver plugins
+ENV GDAL_DRIVER_PATH="/opt/conda/lib/gdalplugins"
+
+# Explicitly tell the PROJ library where to find its data files (proj.db)
+ENV PROJ_LIB="/opt/conda/share/proj"
+
 # Install system dependencies, including glibc for QEMU emulation
 RUN dnf update -y && \
     dnf install -y \
