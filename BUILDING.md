@@ -145,7 +145,7 @@ RUN conda config --system --remove channels defaults && \
     conda config --system --set conda_build.pkg_format 2
 
 # Install conda build tools
-RUN conda install --name base --yes conda-build boa libstdcxx-ng && \
+RUN conda install --name base --yes conda-build boa libstdcxx-ng gdal && \
     conda clean --all --force --yes
 
 # Set up the build space
