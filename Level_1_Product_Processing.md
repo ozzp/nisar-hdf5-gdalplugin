@@ -39,7 +39,7 @@ For each point in the `azimuth_times` and `slant_ranges` grid arrays, the driver
 
 1.  **Get Geographic Coordinate**: It retrieves the longitude and latitude from the `coordinateX` and `coordinateY` cubes. These become the `(X, Y)` of the GCP.
 2.  **Calculate Pixel Coordinate**: It calculates the image pixel coordinate using the slant range values.
-      * $GCP_{Pixel} = ((\text{grid\_slant\_range} - \text{startingRange}) / \text{rangePixelSpacing}) + 0.5$
+      * $GCP_{\text{Pixel}} = ((\text{grid\_slant\_range} - \text{startingRange}) / \text{rangePixelSpacing}) + 0.5$
 3.  **Calculate Line Coordinate**: It calculates the image line coordinate by converting all time values to a common reference (Unix time).
       * First, the epoch from the `units` attribute is converted to a Unix timestamp (`time_epoch`).
       * The `scene_start_time` is also converted to a Unix timestamp.
