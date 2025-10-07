@@ -117,14 +117,13 @@ def reproject_nisar_l1(source_path: str, output_path: str):
         return False
 
 if __name__ == '__main__':
-    # --- KEY CHANGES START HERE ---
-
-    # 1. Set up the argument parser
+    
+    # Set up the argument parser
     parser = argparse.ArgumentParser(
         description="Reprojects a NISAR L1 HDF5 file to a geocoded GeoTIFF using GCPs."
     )
     
-    # 2. Define the command-line arguments
+    # Define the command-line arguments
     parser.add_argument(
         "source_file", 
         help="The full NISAR virtual filename (e.g., 'NISAR:/path/to/file.h5:/path/to/dataset')."
@@ -134,16 +133,16 @@ if __name__ == '__main__':
         help="The path for the output GeoTIFF file."
     )
     
-    # 3. Parse the arguments provided by the user
+    # Parse the arguments provided by the user
     args = parser.parse_args()
 
-    # 4. Call the main function with the parsed arguments
+    # Call the main function with the parsed arguments
     reproject_nisar_l1(args.source_file, args.output_file)
 ```
 
 ### How to Run the Script
 
-Save the code as `warp_nisar_l1.py` and run it from your terminal.  It's a good practice to put the NISAR source filename in quotes (' ') because it contains colons that can confuse the shell.
+Save the code as `warp_nisar_l1.py` and run it from your terminal.  It's recommended to put the NISAR source filename in quotes (' ') because it contains colons that can confuse the shell.
 
 ```bash
 python warp_nisar_l1.py <source_file> <output_file>
