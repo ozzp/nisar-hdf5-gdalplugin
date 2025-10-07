@@ -43,8 +43,8 @@ For each point in the `azimuth_times` and `slant_ranges` grid arrays, the driver
 3.  **Calculate Line Coordinate**: It calculates the image line coordinate by converting all time values to a common reference (Unix time).
       * First, the epoch from the `units` attribute is converted to a Unix timestamp (`time_epoch`).
       * The `scene_start_time` is also converted to a Unix timestamp.
-      * $GCP_{UnixTime} = \text{time\_epoch} + \text{grid\_azimuth\_time}$
-      * $GCP_{Line} = ((\text{GCP}_{UnixTime} - \text{scene\_start\_time}) \times PRF) + 0.5$
+      * $GCP_{UnixTime} = timeEpoch + gridAzimuthTime$
+      * $GCP_{Line} = ((GCP_{UnixTime} - sceneStartTime) \times PRF) + 0.5$
 4.  **Set GCPs**: The final list of `(Pixel, Line) -> (Lon, Lat)` points is attached to the GDAL dataset, along with the EPSG code.
 
 ## Example Usage: Geocoding with `gdalwarp`
