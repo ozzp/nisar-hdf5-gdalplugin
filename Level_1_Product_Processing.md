@@ -94,7 +94,7 @@ def reproject_nisar_l1(source_path: str, output_path: str):
     # Set up the warp options, mirroring the command-line flags.
     warp_options = gdal.WarpOptions(
         dstSRS='EPSG:4326',                # Corresponds to -t_srs
-        transformerOptions=['METHOD=TPS'], # Corresponds to -tps for high accuracy
+        tps=True, # Corresponds to -tps for high accuracy
         resampleAlg=gdal.GRIORA_Cubic,     # Corresponds to -r cubic
         creationOptions=['COMPRESS=LZW'],  # Corresponds to -co COMPRESS=LZW
         dstNodata=0                        # Set NoData value in output
