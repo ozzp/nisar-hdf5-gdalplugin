@@ -93,6 +93,10 @@ def reproject_nisar_l1(source_path: str, output_path: str):
 
     gdal.UseExceptions()
 
+    # Define a 1000x1000 pixel window from near the center of the source image
+    # Format is [x_offset, y_offset, x_size, y_size]
+    source_window = [9380, 2590, 1000, 1000]
+
     # Set up the warp options, mirroring the command-line flags.
     warp_options = gdal.WarpOptions(
         dstSRS='EPSG:4326',                # Corresponds to -t_srs
