@@ -732,36 +732,41 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
                   "Empty filename is provided after 'NISAR:' prefix in '%s'", pszFullInput );
         return nullptr;
     }
-
-    // Now, parse pszDataIdentifier to separate filename and HDF5 path
+	
+    // Now, parse pszDataIdentifier to separate filename and HDF5 path.
     const char *pszLastColon = strrchr(pszDataIdentifier, ':');
 
-    if (pszLastColon == nullptr) {
-        // No colon found; assume entire string is the filename
-        // Use CPLStrdup to ensure pszActualFilename is always allocated and needs freeing
+    // Check if the last colon is part of a URI scheme (e.g., "s3://").
+    // If it is, then there is no subdataset path provided in the string.
+    if (pszLastColon != nullptr && pszLastColon[1] == '/' && pszLastColon[2] == '/')
+    {
+        // The colon is part of a '://' scheme. The whole string is the filename.
         pszActualFilename = CPLStrdup(pszDataIdentifier);
-        pszSubdatasetPath = nullptr; // No specific path provided
-        CPLDebug("NISAR_DRIVER", "No HDF5 path specified in input. Filename: %s", pszActualFilename);
-    } else {
-        // Colon found. Split into filename and path.
-        // Subdataset path starts AFTER the last colon
+        pszSubdatasetPath = nullptr;
+        CPLDebug("NISAR_DRIVER", "URI detected with no subdataset path. Filename: %s",
+                 pszActualFilename);
+    }
+    // Check if a colon was found at all.
+    else if (pszLastColon != nullptr)
+    {
+        // A colon was found, and it's not part of a '://' scheme.
+        // Treat it as the subdataset separator.
         pszSubdatasetPath = pszLastColon + 1;
-
-        // Filename is the part BEFORE the last colon. Copy it.
         size_t nFilenameLen = pszLastColon - pszDataIdentifier;
         pszActualFilename = (char *)CPLMalloc(nFilenameLen + 1);
         strncpy(pszActualFilename, pszDataIdentifier, nFilenameLen);
         pszActualFilename[nFilenameLen] = '\0';
 
-        // Handle case where path part is empty (e.g., "NISAR:file.h5:")
-        if (pszSubdatasetPath[0] == '\0') {
-            CPLError(CE_Warning, CPLE_AppDefined,
-                     "Empty HDF5 path provided after colon for '%s'. Using default.", pszActualFilename);
-            pszSubdatasetPath = nullptr; // Treat as unspecified
-        }
-
-        CPLDebug("NISAR_DRIVER", "HDF5 path specified in input. Filename: %s, Path: %s",
-                 pszActualFilename, pszSubdatasetPath ? pszSubdatasetPath : "(none)");
+        CPLDebug("NISAR_DRIVER", "HDF5 path specified. Filename: %s, Path: %s",
+                 pszActualFilename, pszSubdatasetPath);
+    }
+    else
+    {
+        // No colon found at all. The whole string is the filename.
+        pszActualFilename = CPLStrdup(pszDataIdentifier);
+        pszSubdatasetPath = nullptr;
+        CPLDebug("NISAR_DRIVER", "No colon separator found. Filename: %s",
+                 pszActualFilename);
     }
 
     // Final check on extracted filename
