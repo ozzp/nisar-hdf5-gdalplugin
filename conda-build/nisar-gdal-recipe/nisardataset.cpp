@@ -2234,7 +2234,7 @@ CPLErr NisarDataset::GenerateGCPsFromGeolocationGrid(const char* pszProductGroup
     time_units = ReadH5StringAttribute(hAzimuthTimeDset, "units");
     //H5Dclose(hAzimuthTimeDset);
 
-    if( sscanf(time_units.c_str(), "seconds since %d-%d-%d %d:%d:%d",
+    if( sscanf(time_units.c_str(), "seconds since %d-%d-%dT%d:%d:%d",
                &nEpochYear, &nEpochMonth, &nEpochDay, &nEpochHour, &nEpochMin, &nEpochSec) == 6)
     {
         struct tm epoch_tm;
