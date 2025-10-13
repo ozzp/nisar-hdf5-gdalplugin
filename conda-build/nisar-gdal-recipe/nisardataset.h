@@ -82,6 +82,7 @@ class NisarDataset : public GDALPamDataset
     CPLErr GetGeoTransform( double * padfTransform ) override;
     const OGRSpatialReference *GetSpatialRef() const override;
     CPLErr GenerateGCPsFromGeolocationGrid(const char* pszProductGroup);
+    char **GetFileList() override;
 };
 
 #endif //NISAR_DATASET_H

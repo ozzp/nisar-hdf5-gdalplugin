@@ -317,6 +317,20 @@ static bool Read1DDoubleVec(hid_t hFile, const char* pszPath, std::vector<double
     return true;
 }
 
+char **NisarDataset::GetFileList()
+{
+    // Start with the default list from the parent class (which might include .aux.xml)
+    char **papszFileList = GDALPamDataset::GetFileList();
+
+    // Add the main HDF5 filename to the list
+    if (pszFilename != nullptr)
+    {
+        papszFileList = CSLAddString(papszFileList, pszFilename);
+    }
+
+    return papszFileList;
+}
+
 GDALDataType NisarDataset::GetGDALDataType(hid_t hH5Type)
 {
     // Check Simple Native Types First
@@ -609,80 +623,117 @@ char **NisarDataset::GetMetadata( const char *pszDomain )
     if (pszDomain == nullptr || EQUAL(pszDomain, "")) {
         std::lock_guard<std::mutex> lock(m_MetadataMutex);
         if (m_bGotMetadata) {
-             CPLDebug("NISAR_DRIVER", "GetMetadata('') returning cached PAM list.");
-             return GDALPamDataset::GetMetadata(pszDomain);
+            return GDALPamDataset::GetMetadata(pszDomain);
         }
         m_bGotMetadata = true;
         CPLDebug("NISAR_DRIVER", "GetMetadata('') attempting to load/merge HDF5 attributes.");
         TryLoadXML();
 
         char **papszHDFMetadata = nullptr;
-        NISAR_AttrCallbackData callback_data;
-        callback_data.ppapszList = &papszHDFMetadata;
 
-        if (this->hHDF5 < 0) { CPLError(CE_Warning, CPLE_AppDefined, "Cannot read default metadata: HDF5 file handle invalid."); }
-        else if (this->hDataset < 0) {
-             // Container Dataset Case: Read attributes from ROOT group
-             CPLDebug("NISAR_DRIVER", "Reading default metadata from root group ('/') for container dataset.");
-             hsize_t idx = 0;
-             // *** FIX: Iterate attributes on the root group (file handle) ***
-             herr_t iter_status = H5Aiterate2(this->hHDF5, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
-                         NISAR_AttributeCallback, &callback_data);
-             CPLDebug("NISAR_DRIVER", "Finished iterating root attributes (Status: %d). Found %d items for container default metadata.",
-                      (int)iter_status, CSLCount(papszHDFMetadata));
-             // Fall through to merge papszHDFMetadata into PAM
-        } else {
-            // Specific Dataset Case: Read attributes from dataset and related objects
-            CPLDebug("NISAR_DRIVER", "Reading HDF5 attributes for default metadata domain from specific dataset and related objects.");
+        // Case 1: Level 1 Product (has GCPs)
+        if (GetGCPCount() > 0)
+        {
+            CPLDebug("NISAR_DRIVER", "L1 product detected in GetMetadata, reading attributes from the dataset only.");
+            if (this->hDataset >= 0) {
+                NISAR_AttrCallbackData callback_data;
+                callback_data.ppapszList = &papszHDFMetadata;
+                hsize_t idx = 0;
+                // Iterate attributes only on the opened dataset itself
+                H5Aiterate2(this->hDataset, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
+                            NISAR_AttributeCallback, &callback_data);
+            }
+        }
+        // Case 2: Level 2 Product (no GCPs, has a raster dataset open)
+        else if (this->hDataset >= 0)
+        {
+            CPLDebug("NISAR_DRIVER", "L2 product detected in GetMetadata, reading from dataset and related geo-datasets.");
+            
             std::string datasetPath = get_hdf5_object_name(this->hDataset);
-            std::string groupPath = "";
-            // ... (calculate groupPath) ...
-            if (!datasetPath.empty()) { if (const char* lastSlash = strrchr(datasetPath.c_str(), '/')) { if (lastSlash == datasetPath.c_str()) groupPath = "/"; else groupPath = datasetPath.substr(0, lastSlash - datasetPath.c_str()); if(groupPath.empty()) groupPath = "/"; } else { groupPath = "/"; } }
-            else { CPLError(CE_Warning, CPLE_AppDefined, "Cannot determine dataset path for metadata reading."); }
+            std::string productRootPath;
+            std::string frequencyGroup = "frequencyA";
 
-            std::vector<std::pair<std::string, hid_t>> objects_to_scan;
-            objects_to_scan.push_back({datasetPath, this->hDataset});
-            hid_t hProjection = -1, hXCoord = -1, hYCoord = -1;
-            if (!groupPath.empty()) {
-                 // ... (Open projection, xCoords, yCoords, add to objects_to_scan if successful) ...
-                 std::string projectionPath = groupPath + (groupPath == "/" ? "" : "/") + "projection"; hProjection = H5Dopen2(this->hHDF5, projectionPath.c_str(), H5P_DEFAULT); if (hProjection >= 0) objects_to_scan.push_back({projectionPath, hProjection});
-                 std::string xCoordPath = groupPath + (groupPath == "/" ? "" : "/") + "xCoordinates"; hXCoord = H5Dopen2(this->hHDF5, xCoordPath.c_str(), H5P_DEFAULT); if (hXCoord >= 0) objects_to_scan.push_back({xCoordPath, hXCoord});
-                 std::string yCoordPath = groupPath + (groupPath == "/" ? "" : "/") + "yCoordinates"; hYCoord = H5Dopen2(this->hHDF5, yCoordPath.c_str(), H5P_DEFAULT); if (hYCoord >= 0) objects_to_scan.push_back({yCoordPath, hYCoord});
+            // Find the product's root path (e.g., "/science/LSAR/GCOV")
+            size_t start_pos = datasetPath.find("/science/LSAR/");
+            if (start_pos != std::string::npos) {
+                size_t end_pos = datasetPath.find('/', start_pos + strlen("/science/LSAR/"));
+                if (end_pos != std::string::npos) {
+                    productRootPath = datasetPath.substr(0, end_pos);
+                }
             }
 
-            // Iterate attributes for each relevant object
-            for (const auto& pair : objects_to_scan) {
-                 const std::string& obj_path = pair.first;
-                 hid_t obj_id = pair.second;
-                 if(obj_id < 0 || obj_path.empty()) continue;
-                 CPLDebug("NISAR_DRIVER", "Reading attributes from: %s", obj_path.c_str());
-                 char** papszObjAttrs = nullptr;
-                 NISAR_AttrCallbackData obj_callback_data;
-                 obj_callback_data.ppapszList = &papszObjAttrs;
-                 hsize_t idx = 0;
-                 H5Aiterate2(obj_id, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
-                             NISAR_AttributeCallback, &obj_callback_data);
+            // Only proceed if we found a valid root path
+            if (!productRootPath.empty()) {
+                if (datasetPath.find("/frequencyB/") != std::string::npos) {
+                    frequencyGroup = "frequencyB";
+                }
+                std::string geoBasePath = productRootPath + "/grids/" + frequencyGroup + "/";
 
-                 // Add formatted attributes (OBJECT_PATH#NAME=VALUE) to the main HDF5 list
-                 for (int i=0; papszObjAttrs != nullptr && papszObjAttrs[i] != nullptr; ++i) {
-                      char* pszKey = nullptr; const char* pszValue = CPLParseNameValue(papszObjAttrs[i], &pszKey);
-                      if (pszKey && pszValue) { std::string finalKey = obj_path + "#" + pszKey; papszHDFMetadata = CSLSetNameValue(papszHDFMetadata, finalKey.c_str(), pszValue); }
-                      CPLFree(pszKey);
-                 }
-                 CSLDestroy(papszObjAttrs);
+                std::vector<std::pair<std::string, hid_t>> objects_to_scan;
+                objects_to_scan.push_back({datasetPath, this->hDataset});
+
+                // Suppress errors for optional datasets
+                H5E_auto2_t old_func;
+                void *old_client_data;
+                H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+                H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+                hid_t hProjection = H5Dopen2(this->hHDF5, (geoBasePath + "projection").c_str(), H5P_DEFAULT);
+                if (hProjection >= 0) objects_to_scan.push_back({geoBasePath + "projection", hProjection});
+                hid_t hXCoord = H5Dopen2(this->hHDF5, (geoBasePath + "xCoordinates").c_str(), H5P_DEFAULT);
+                if (hXCoord >= 0) objects_to_scan.push_back({geoBasePath + "xCoordinates", hXCoord});
+                hid_t hYCoord = H5Dopen2(this->hHDF5, (geoBasePath + "yCoordinates").c_str(), H5P_DEFAULT);
+                if (hYCoord >= 0) objects_to_scan.push_back({geoBasePath + "yCoordinates", hYCoord});
+
+                H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore errors
+
+                for (const auto& pair : objects_to_scan) {
+                    const std::string& obj_path = pair.first;
+                    hid_t obj_id = pair.second;
+                    if(obj_id < 0 || obj_path.empty()) continue;
+
+                    CPLDebug("NISAR_DRIVER", "Reading attributes from: %s", obj_path.c_str());
+                    char** papszObjAttrs = nullptr;
+                    NISAR_AttrCallbackData obj_callback_data;
+                    obj_callback_data.ppapszList = &papszObjAttrs;
+                    hsize_t idx = 0;
+                    H5Aiterate2(obj_id, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
+                                NISAR_AttributeCallback, &obj_callback_data);
+
+                    for (int i=0; papszObjAttrs != nullptr && papszObjAttrs[i] != nullptr; ++i) {
+                        char* pszKey = nullptr;
+                        const char* pszValue = CPLParseNameValue(papszObjAttrs[i], &pszKey);
+                        if (pszKey && pszValue) {
+                            std::string finalKey = obj_path + "#" + pszKey;
+                            papszHDFMetadata = CSLSetNameValue(papszHDFMetadata, finalKey.c_str(), pszValue);
+                        }
+                        CPLFree(pszKey);
+                    }
+                    CSLDestroy(papszObjAttrs);
+                }
+                if(hProjection >= 0) H5Dclose(hProjection);
+                if(hXCoord >= 0) H5Dclose(hXCoord);
+                if(hYCoord >= 0) H5Dclose(hYCoord);
             }
-            // Close handles opened in the loop
-            if(hProjection >= 0) H5Dclose(hProjection); if(hXCoord >= 0) H5Dclose(hXCoord); if(hYCoord >= 0) H5Dclose(hYCoord);
-        } // End specific dataset case
-
-        // Now, merge the collected HDF5 attributes (papszHDFMetadata) into PAM
-        if (papszHDFMetadata != nullptr) {
-             CPLDebug("NISAR_DRIVER", "Merging %d HDF5 attributes into PAM default domain.", CSLCount(papszHDFMetadata));
-             SetMetadata(papszHDFMetadata);
-             CSLDestroy(papszHDFMetadata);
+        }
+        // Case 3: Container Dataset (no raster bands open)
+        else
+        {
+            CPLDebug("NISAR_DRIVER", "Reading default metadata from root group ('/') for container dataset.");
+            NISAR_AttrCallbackData callback_data;
+            callback_data.ppapszList = &papszHDFMetadata;
+            hsize_t idx = 0;
+            H5Aiterate2(this->hHDF5, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
+                        NISAR_AttributeCallback, &callback_data);
         }
 
-        // Return the final merged list managed by PAM
+        // Now, merge the collected HDF5 attributes into PAM
+        if (papszHDFMetadata != nullptr) {
+            CPLDebug("NISAR_DRIVER", "Merging %d HDF5 attributes into PAM default domain.", CSLCount(papszHDFMetadata));
+            SetMetadata(papszHDFMetadata);
+            CSLDestroy(papszHDFMetadata);
+        }
+
         return GDALPamDataset::GetMetadata(pszDomain);
     } // End default domain handling
 
@@ -732,7 +783,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
                   "Empty filename is provided after 'NISAR:' prefix in '%s'", pszFullInput );
         return nullptr;
     }
-	
+/////////////
     // Now, parse pszDataIdentifier to separate filename and HDF5 path.
     const char *pszLastColon = strrchr(pszDataIdentifier, ':');
 
@@ -768,7 +819,7 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
         CPLDebug("NISAR_DRIVER", "No colon separator found. Filename: %s",
                  pszActualFilename);
     }
-
+///////////
     // Final check on extracted filename
     if (pszActualFilename == nullptr || pszActualFilename[0] == '\0') {
         CPLError(CE_Failure, CPLE_OpenFailed, "Could not determine filename from input: %s", pszFullInput);
@@ -780,7 +831,6 @@ GDALDataset *NisarDataset::Open( GDALOpenInfo * poOpenInfo ) {
     CPLDebug("NISAR_DRIVER", "Parsed HDF5 Subdataset Path: %s", pszSubdatasetPath ? pszSubdatasetPath : "(none specified)");
 
     // Basic check: Does it have an .h5 extension? (Weak check)
-    //if (!EQUAL(CPLGetExtension(pszActualFilename), "h5")) {
     if (!EQUAL(CPLGetExtensionSafe(pszActualFilename).c_str(), "h5")) {
          return nullptr;
     }
@@ -1611,10 +1661,11 @@ CPLErr NisarDataset::GetGeoTransform( double * padfTransform )
     // Check if this is a container dataset (no raster bands)
     // If nRasterXSize is 0 (set during subdataset discovery), return default GT.
     // Also check if the main dataset handle is valid.
-    if (nRasterXSize == 0 || hDataset < 0) {
+    if (hDataset < 0) {
          CPLDebug("NISAR_DRIVER", "GetGeoTransform called on container dataset or invalid handle. Returning default identity.");
          // It's not an error for a container to lack a GeoTransform
-         return CE_None;
+         // Return failure to prevent gdalinfo from printing a default transform.
+         return GDALPamDataset::GetGeoTransform(padfTransform);
     }
 
     // Handles opened in this function
@@ -1636,15 +1687,25 @@ CPLErr NisarDataset::GetGeoTransform( double * padfTransform )
     std::string yCoordinatesPath;
     std::string xCoordinateSpacingPath;
     std::string yCoordinateSpacingPath;
+    std::string productRootPath;
+    std::string frequencyGroup = "frequencyA"; // Default to frequencyA
+    std::string geoBasePath;
     double xSpacing = 0.0;
     double ySpacing = 0.0;
     double xCoord = 0.0;
-    double yCoord = 0.0; // TODO: Re-investigate why this read 4.94e-324 previously
+    double yCoord = 0.0;
     hsize_t count1d[1] = {0};
     hsize_t offset1d[1] = {0};
+    size_t start_pos;
+    size_t end_pos;
 
     CPLErr eErr = CE_Failure; // Status flag, default to failure until success
 
+    //ADD ERROR SUPPRESSION SETUP
+    H5E_auto2_t old_func;
+    void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
 
     // Method 1: Try reading standard 'GeoTransform' attribute
     // IMPORTANT: Verify attribute name ("GeoTransform") from NISAR
@@ -1663,39 +1724,41 @@ CPLErr NisarDataset::GetGeoTransform( double * padfTransform )
     }
 
     //  Method 2: Fallback to reading coordinate/spacing datasets
+    // For L2 products, georeferencing data is always in a central 'grids' group,
+    // regardless of which subdataset we opened.
     CPLDebug("NISAR_DRIVER", "Attribute '%s' not found or failed. Falling back to coordinate/spacing datasets.", pszGeoTransformAttrName);
 
-    // Get the full path of the main dataset to find its parent group
+    // Get the full path of the main dataset
     datasetPath = get_hdf5_object_name(this->hDataset); // Uses static helper
-    if (datasetPath.empty() || datasetPath == "/") { // Check if getting name failed or is root
-         CPLError(CE_Warning, CPLE_AppDefined, "GetGeoTransform: Could not get valid path for main dataset or dataset is at root. Cannot find relative coordinate datasets.");
-         eErr = CE_Failure; // Cannot proceed with this method
-         goto cleanup;
+   // Dynamically find the product's root path (e.g., "/science/LSAR/GCOV")
+    start_pos = datasetPath.find("/science/LSAR/");
+    if (start_pos != std::string::npos) {
+        end_pos = datasetPath.find('/', start_pos + strlen("/science/LSAR/"));
+        if (end_pos != std::string::npos) {
+            productRootPath = datasetPath.substr(0, end_pos);
+        }
     }
 
-    // Calculate parent group path
-    lastSlash = strrchr(datasetPath.c_str(), '/'); // Use standard C func
-    if (lastSlash == datasetPath.c_str()) { // Only one slash at beginning
-        groupPath = "/";
-    } else if (lastSlash != nullptr) {
-        groupPath = datasetPath.substr(0, lastSlash - datasetPath.c_str());
-         if(groupPath.empty()){ // Should not happen if datasetPath != "/"
-             groupPath = "/";
-         }
-    } else { // No slash found - should not happen for valid dataset paths
-         CPLError(CE_Warning, CPLE_AppDefined, "GetGeoTransform: Could not determine parent group path for '%s'.", datasetPath.c_str());
-         eErr = CE_Failure;
-         goto cleanup;
+    if (productRootPath.empty()) {
+        CPLError(CE_Warning, CPLE_AppDefined, "Could not determine product root path for georeferencing.");
+        goto cleanup;
     }
-    CPLDebug("NISAR_DRIVER", "Derived parent group path: %s", groupPath.c_str());
 
+    // Determine the frequency band by checking the dataset's own path
+    if (datasetPath.find("/frequencyB/") != std::string::npos) {
+        frequencyGroup = "frequencyB";
+    }
+    CPLDebug("NISAR_DRIVER", "Detected frequency group: %s", frequencyGroup.c_str());
 
-    // Construct full paths for coordinate/spacing datasets
-    // *** IMPORTANT: Verify these dataset names ("xCoordinates", etc.) from NISAR Spec ***
-    xCoordinatesPath       = groupPath + (groupPath == "/" ? "" : "/") + "xCoordinates";
-    yCoordinatesPath       = groupPath + (groupPath == "/" ? "" : "/") + "yCoordinates";
-    xCoordinateSpacingPath = groupPath + (groupPath == "/" ? "" : "/") + "xCoordinateSpacing";
-    yCoordinateSpacingPath = groupPath + (groupPath == "/" ? "" : "/") + "yCoordinateSpacing";
+    // Construct the correct, fixed path to the georeferencing datasets
+    geoBasePath = productRootPath + "/grids/" + frequencyGroup + "/";
+    CPLDebug("NISAR_DRIVER", "Derived georeferencing base path: %s", geoBasePath.c_str());
+
+    xCoordinatesPath       = geoBasePath + "xCoordinates";
+    yCoordinatesPath       = geoBasePath + "yCoordinates";
+    xCoordinateSpacingPath = geoBasePath + "xCoordinateSpacing";
+    yCoordinateSpacingPath = geoBasePath + "yCoordinateSpacing";
+
     CPLDebug("NISAR_DRIVER", "Attempting to read: %s, %s, %s, %s",
              xCoordinatesPath.c_str(), yCoordinatesPath.c_str(),
              xCoordinateSpacingPath.c_str(), yCoordinateSpacingPath.c_str());
@@ -1706,6 +1769,9 @@ CPLErr NisarDataset::GetGeoTransform( double * padfTransform )
     hYCoords = H5Dopen2(this->hHDF5, yCoordinatesPath.c_str(), H5P_DEFAULT);
     hXSpacing = H5Dopen2(this->hHDF5, xCoordinateSpacingPath.c_str(), H5P_DEFAULT);
     hYSpacing = H5Dopen2(this->hHDF5, yCoordinateSpacingPath.c_str(), H5P_DEFAULT);
+
+    // RESTORE ERROR HANDLER
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
 
     // Check if all datasets were opened successfully
     if (hXCoords < 0 || hYCoords < 0 || hXSpacing < 0 || hYSpacing < 0) {
@@ -1815,9 +1881,10 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
  
     CPLDebug("NISAR_DRIVER", "NisarDataset::GetSpatialRef() called.");
     
-    // --- Check if this is a container dataset ---
+    // Check if this is a container dataset
     if (hDataset < 0) {
-         CPLError(CE_Warning, CPLE_AppDefined, "GetSpatialRef: Invalid main dataset handle. Cannot determine SRS.");
+         // CPLError(CE_Warning, CPLE_AppDefined, "GetSpatialRef: Invalid main dataset handle. Cannot determine SRS.");
+         // This is a container dataset, it has no SRS. Return quietly.
          return nullptr; // Return null for container or if handle invalid
     }
      // Could also check nRasterXSize == 0, but hDataset < 0 is sufficient
@@ -1833,7 +1900,9 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     char *pszWKT_VL = nullptr;    // For reading WKT string attribute (variable length)
 
     // Path construction variables
+    std::string productRootPath;
     std::string datasetPath;
+    std::string frequencyGroup = "frequencyA"; // Default to frequencyA
     const char* lastSlash = nullptr;
     std::string groupPath;
     std::string projectionPath;
@@ -1841,45 +1910,43 @@ const OGRSpatialReference* NisarDataset::GetSpatialRef() const
     // Temporary pointer for newly created SRS object during processing
     OGRSpatialReference *poTmpSRS = nullptr;
 
-    // ADD ERROR SUPPRESSION
+    // Dynamically find the product's root path
+    datasetPath = get_hdf5_object_name(this->hDataset);
+    size_t start_pos = datasetPath.find("/science/LSAR/");
+    if (start_pos != std::string::npos) {
+        size_t end_pos = datasetPath.find('/', start_pos + strlen("/science/LSAR/"));
+        if (end_pos != std::string::npos) {
+            productRootPath = datasetPath.substr(0, end_pos);
+        }
+    }
+
+    if (productRootPath.empty()) {
+        CPLError(CE_Warning, CPLE_AppDefined, "GetSpatialRef: Could not determine product root path.");
+        goto cleanup;
+    }
+
+    // Determine the frequency band by checking the dataset's own path
+    if (datasetPath.find("/frequencyB/") != std::string::npos) {
+        frequencyGroup = "frequencyB";
+    }
+
+    projectionPath = productRootPath + "/grids/" + frequencyGroup + "/projection";
+    CPLDebug("NISAR_DRIVER", "Attempting to open projection dataset: %s", projectionPath.c_str());
+    
+    // Wrap the HDF5 call that might fail in error suppression
     H5E_auto2_t old_func;
     void *old_client_data;
     H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
     H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
 
-    // Determine Path to Projection Info
-    // Need to find the group containing the main dataset first
-    if (this->hDataset < 0) {
-        CPLError(CE_Warning, CPLE_AppDefined, "GetSpatialRef: Invalid main dataset handle.");
-        return nullptr;
-    }
-    datasetPath = get_hdf5_object_name(this->hDataset);
-    if (datasetPath.empty() || datasetPath == "/") {
-        CPLError(CE_Warning, CPLE_AppDefined, "GetSpatialRef: Could not get path of main dataset or dataset is at root. Cannot find projection dataset.");
-        // Error handled inside helper or return empty
-        goto cleanup;
-    }
-    lastSlash = strrchr(datasetPath.c_str(), '/'); // Use standard C func
-    //groupPath;
-    if (lastSlash == datasetPath.c_str()) groupPath = "/";
-    else if (lastSlash != nullptr) { groupPath = datasetPath.substr(0, lastSlash - datasetPath.c_str()); if(groupPath.empty()) groupPath = "/"; }
-    else { groupPath = "/"; } // Fallback? Should error?
-
-    // IMPORTANT: Verify dataset name ("projection") from NISAR Spec
-    projectionPath = groupPath + (groupPath == "/" ? "" : "/") + "projection";
-    CPLDebug("NISAR_DRIVER", "Attempting to open projection dataset: %s", projectionPath.c_str());
-
-    // Open the Projection "Dataset" (often just holds attributes)
     hProjectionDataset = H5Dopen2( this->hHDF5, projectionPath.c_str(), H5P_DEFAULT );
-    if (hProjectionDataset < 0) {
-        //No CPLError here, as this is expected for all L1 products
-        //CPLError(CE_Warning, CPLE_OpenFailed, "GetSpatialRef: Failed to open projection dataset: '%s'. No SRS available.", projectionPath.c_str());
-        CPLDebug("NISAR_DRIVER", "GetSpatialRef: Optional 'projection' dataset not found for this product, this is expected for Level 1 Product.");
-        goto cleanup; // Go directly to cleanup, will return nullptr
-    }
 
-    // RESTORE ERROR HANDLER
-    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // RESTORE HANDLER IMMEDIATELY
+
+    if (hProjectionDataset < 0) {
+        CPLDebug("NISAR_DRIVER", "GetSpatialRef: Optional 'projection' dataset not found.");
+        goto cleanup; // Now safe to jump
+    }
 
     // Try Reading EPSG Code Attribute
     hAttribute = H5Aopen(hProjectionDataset, "epsg_code", H5P_DEFAULT);

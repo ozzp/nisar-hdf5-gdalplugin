@@ -73,6 +73,7 @@ export GDAL_CACHEMAX=2048
 export GDAL_DISABLE_READDIR_ON_OPEN=TRUE
 export GDAL_HTTP_VERSION=2
 export GDAL_NUM_THREADS=ALL_CPUS
+export GDAL_PAM_ENABLED=NO
 
 # Set GDAL S3 Authentication
 echo "Setting GDAL configuration for S3 authentication..."

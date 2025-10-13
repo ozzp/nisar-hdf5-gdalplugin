@@ -114,6 +114,9 @@ ENV PATH="/opt/conda/bin:$PATH"
 # Explicitly tell GDAL where to find custom driver plugins
 ENV GDAL_DRIVER_PATH="/opt/conda/lib/gdalplugins"
 
+# As we build read-only gdal driver
+ENV GDAL_PAM_ENABLED=NO
+
 # Explicitly tell the PROJ library where to find its data files (proj.db)
 ENV PROJ_LIB="/opt/conda/share/proj"
 
