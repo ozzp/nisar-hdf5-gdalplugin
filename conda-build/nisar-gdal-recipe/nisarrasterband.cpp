@@ -111,53 +111,53 @@ NisarRasterBand::~NisarRasterBand()
 // NisarRasterBand::GetMetadata
 char **NisarRasterBand::GetMetadata( const char *pszDomain )
 {
-    // Handle non-default domains via PAM first
+    // First, let the PAM system load any existing metadata from .aux.xml
+    GDALPamRasterBand::GetMetadata(pszDomain);
+
+    // Handle non-default domains using only the PAM system
     if (pszDomain != nullptr && !EQUAL(pszDomain, "")) {
-         // Ensure PAM system is initialized for this band
-         return GDALPamRasterBand::GetMetadata(pszDomain);
+        return GDALPamRasterBand::GetMetadata(pszDomain);
     }
 
-    // Handle default domain ("" or nullptr) with caching
-    { // Scope for lock guard
-        std::lock_guard<std::mutex> lock(m_MetadataMutex);
+    // Handle the default domain with caching
+    std::lock_guard<std::mutex> lock(m_MetadataMutex);
 
-        // Check cache flag: Have we already read HDF5 attributes for this band?
-        if (!m_bMetadataRead)
-        {
-            // No, read HDF5 attributes for the first time
-            m_bMetadataRead = true; // Mark as attempted
-            CPLDebug("NISAR_Band", "Band %d: Reading HDF5 attributes for default metadata domain.", nBand);
+    // If we've already read the HDF5 attributes, just return what PAM has.
+    if (m_bMetadataRead) {
+        return GDALPamRasterBand::GetMetadata(pszDomain);
+    }
+    m_bMetadataRead = true; // Mark as read for this session
 
-            NisarDataset *poGDS = reinterpret_cast<NisarDataset *>( this->poDS );
-            hid_t hDatasetID = poGDS ? poGDS->GetDatasetHandle() : -1;
+    CPLDebug("NISAR_Band", "Band %d: Reading HDF5 attributes for default metadata domain.", nBand);
 
-            if (hDatasetID >= 0) {
-                // Build HDF5 attributes into a temporary list
-                char **papszHDFMeta = nullptr;
-                NISAR_AttrCallbackData callback_data;
-                callback_data.ppapszList = &papszHDFMeta;
-                hsize_t idx = 0;
+    NisarDataset *poGDS = reinterpret_cast<NisarDataset *>( this->poDS );
+    hid_t hDatasetID = poGDS ? poGDS->GetDatasetHandle() : -1;
 
-                // Iterate attributes directly on this band's dataset handle
-                H5Aiterate2(hDatasetID, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
-                            NISAR_AttributeCallback, &callback_data);
+    if (hDatasetID >= 0) {
+        char **papszHDFMeta = nullptr;
+        NISAR_AttrCallbackData callback_data;
+        callback_data.ppapszList = &papszHDFMeta;
+        
+        // Band attributes are local and shouldn't have the full path.
+        callback_data.pszPrefix = ""; 
+	// Get the full HDF5 path of this band's dataset to use as a prefix.
+        //std::string datasetPath = get_hdf5_object_name(hDatasetID);
+        //callback_data.pszPrefix = datasetPath.c_str();
 
-                if (papszHDFMeta != nullptr) {
-                     // SetMetadata will merge papszHDFMeta with the internal PAM list
-                     // for the default domain.
-                     SetMetadata(papszHDFMeta);
+        hsize_t idx = 0;
+        H5Aiterate2(hDatasetID, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
+                    NISAR_AttributeCallback, &callback_data);
 
-                     // We destroy the temporary list structure itself.
-                     CSLDestroy(papszHDFMeta);
-                     papszHDFMeta = nullptr; // Mark as destroyed
-                }
-            } else {
-                 CPLError(CE_Warning, CPLE_AppDefined, "Band %d: Cannot read HDF5 metadata, dataset handle invalid.", nBand);
-            }
-        } // End if !m_bMetadataRead
-    } // Mutex unlocked here
+        if (papszHDFMeta != nullptr) {
+            // Merge the HDF5 attributes into this band's metadata list
+            SetMetadata(papszHDFMeta);
+            CSLDestroy(papszHDFMeta);
+        }
+    } else {
+        CPLError(CE_Warning, CPLE_AppDefined, "Band %d: Cannot read HDF5 metadata, dataset handle invalid.", nBand);
+    }
 
-    // Always return the (potentially updated) metadata list managed by PAM
+    // Return the final merged list from this band's PAM store
     return GDALPamRasterBand::GetMetadata(pszDomain);
 }
 /***************************************************************************/
