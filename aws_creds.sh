@@ -26,8 +26,8 @@ echo "export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
 echo "export AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}"
 echo
 echo
-echo "os.environ['AWS_REGION']=${AWS_REGION}"
-echo "os.environ['AWS_ACCESS_KEY_ID']=${AWS_ACCESS_KEY_ID}"
-echo "os.environ['AWS_SECRET_ACCESS_KEY']=${AWS_SECRET_ACCESS_KEY}"
-echo "os.environ['AWS_SESSION_TOKEN']=${AWS_SESSION_TOKEN}"
+echo "os.environ['AWS_REGION']='${AWS_REGION}'"
+echo "os.environ['AWS_ACCESS_KEY_ID']='${AWS_ACCESS_KEY_ID}'"
+echo "os.environ['AWS_SECRET_ACCESS_KEY']='${AWS_SECRET_ACCESS_KEY}'"
+echo "os.environ['AWS_SESSION_TOKEN']='${AWS_SESSION_TOKEN}'"
 echo
