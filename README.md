@@ -10,10 +10,9 @@ A read-only GDAL driver for NISAR L-band and S-band(future) HDF5 products, with 
   * **Level 1 (RSLC) Support:** Automatically generates Ground Control Points (GCPs) from the `geolocationGrid` for accurate reprojection.
   * **Level 2 (GCOV/GSLC) Support:** Correctly reads georeferencing (GeoTransform and Spatial Reference) for all datasets, including auxiliary metadata layers.
   * **Cloud-Optimized Access:** Leverages the HDF5 ROS3 VFD (Read-Only S3 Virtual File Driver) to efficiently read data directly from cloud object stores using `s3://` or `/vsis3/` paths.
-  * **Flexible Authentication:** Supports AWS credentials via GDAL Open Options (`--oo PROFILE=...`), environment variables (`AWS_PROFILE`), or IAM roles.
+  * **AWS Authentication:** Supports AWS credentials via environment variables (`AWS_SESSION_TOKEN, etc.`)
   * **Full GDAL Integration:** Enables use with standard utilities like `gdalinfo`, `gdal_translate`, and `gdalwarp`.
 
------
 
 ## Installation
 
@@ -23,53 +22,32 @@ The recommended way to install this plugin is via the conda package manager from
 conda install -c nisar-forge -c conda-forge gdal-driver-nisar
 ```
 
------
+## AWS Authentication
 
-## Usage
+Accessing files from S3 requires AWS credentials. This driver is built on the high-performance HDF5 ROS3 (Read-Only S3) Virtual File Driver, which provides optimized, chunked reads directly from cloud storage.
 
-### AWS Authentication
+The HDF5 ROS3 driver is a low-level tool and **does not support AWS profiles** (from `~/.aws/config`) or IAM roles directly. It requires explicit, temporary credentials to be set as environment variables in your shell.
 
-For accessing files from S3, the driver supports several authentication methods. They are prioritized in the following order:
+The following four environment variables **must** be set in your session *before* running GDAL commands:
 
-#### 1\. GDAL Open Option (Highest Priority)
+* `AWS_ACCESS_KEY_ID`
+* `AWS_SECRET_ACCESS_KEY`
+* `AWS_SESSION_TOKEN`
+* `AWS_REGION`
 
-You can specify an AWS profile for a single command using the `--oo` (Open Option) flag. This is ideal for one-off tasks and overrides all other environment settings.
+### Recommended Workflow 
+
+If you use AWS profiles (e.g., `saml-pub`) for authentication, you must first use the AWS CLI to fetch temporary credentials from your profile and export them to your environment. This is the standard and most secure method.
+
+####  Export Credentials from Your Profile
+
+You must have your region set. You only need to do this once per session. Use the aws configure export-credentials command to fetch and set your temporary keys and token. This command uses your profile (e.g., saml-pub) to authenticate and then prints the export commands for your temporary credentials. The eval command executes them.
 
 ```shell
-gdalinfo --oo PROFILE=my-profile NISAR:s3://my-bucket/path/to/file.h5
-```
-
-#### 2\. Environment Variables (Session-wide)
-
-You can set environment variables for your entire terminal session. This is the most common method for development.
-
-**Using a Profile (Recommended):**
-
-```shell
-export AWS_PROFILE=my-profile
 export AWS_REGION=us-west-2
-gdalinfo NISAR:s3://my-bucket/path/to/file.h5
+eval $(aws configure export-credentials --format env --profile saml-pub)
+This single command will set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN in your terminal.
 ```
-
-**Using Temporary Keys:**
-
-```shell
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-export AWS_SESSION_TOKEN=...
-export AWS_REGION=us-west-2
-gdalinfo NISAR:s3://my-bucket/path/to/file.h5
-```
-
-*Note: The HDF5 ROS3 driver requires `AWS_REGION` to be set.*
-
-#### 3\. Shared Credentials File (Default Fallback)
-
-If no Open Options or environment variables are set, the driver will automatically use the `[default]` profile in your AWS shared credentials file (usually located at `~/.aws/credentials`).
-
-#### 4\. IAM Roles (for Cloud Environments)
-
-If the driver is running in an AWS environment (like an EC2 instance or ECS container), it will automatically use the attached IAM role. This is the most secure and recommended method for production.
 
 
 ### Sample Commands
@@ -83,9 +61,7 @@ If the driver is running in an AWS environment (like an EC2 instance or ECS cont
   * **Get info for a specific subdataset (from S3):**
 
     ```shell
-    # Uses the 'saml-pub' profile to authenticate
-    gdalinfo --oo PROFILE=saml-pub \
-        'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/GSLC/swaths/frequencyA/HH'
+    gdalinfo 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/GSLC/swaths/frequencyA/HH'
     ```
 
   * **Convert a specific L2 subdataset to GeoTIFF:**
