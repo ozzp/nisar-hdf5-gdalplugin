@@ -10,9 +10,8 @@ A read-only GDAL driver for NISAR L-band and S-band(future) HDF5 products, with 
   * **Level 1 (RSLC) Support:** Automatically generates Ground Control Points (GCPs) from the `geolocationGrid` for accurate reprojection.
   * **Level 2 (GCOV/GSLC) Support:** Correctly reads georeferencing (GeoTransform and Spatial Reference) for all datasets, including auxiliary metadata layers.
   * **Cloud-Optimized Access:** Leverages the HDF5 ROS3 VFD (Read-Only S3 Virtual File Driver) to efficiently read data directly from cloud object stores using `s3://` or `/vsis3/` paths.
-  * **AWS Authentication:** Supports AWS credentials via environment variables (`AWS_SESSION_TOKEN, etc.`)
+  * **AWS Authentication:** Supports AWS credentials via explicit environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`).
   * **Full GDAL Integration:** Enables use with standard utilities like `gdalinfo`, `gdal_translate`, and `gdalwarp`.
-
 
 ## Installation
 
@@ -30,27 +29,36 @@ The HDF5 ROS3 driver is a low-level tool and **does not support AWS profiles** (
 
 The following four environment variables **must** be set in your session *before* running GDAL commands:
 
-* `AWS_ACCESS_KEY_ID`
-* `AWS_SECRET_ACCESS_KEY`
-* `AWS_SESSION_TOKEN`
-* `AWS_REGION`
+  * `AWS_ACCESS_KEY_ID`
+  * `AWS_SECRET_ACCESS_KEY`
+  * `AWS_SESSION_TOKEN`
+  * `AWS_REGION`
 
-### Recommended Workflow 
+### Recommended Workflow
 
 If you use AWS profiles (e.g., `saml-pub`) for authentication, you must first use the AWS CLI to fetch temporary credentials from your profile and export them to your environment. This is the standard and most secure method.
 
-####  Export Credentials from Your Profile
+#### 1\. Set Your AWS Region
 
-You must have your region set. You only need to do this once per session. Use the aws configure export-credentials command to fetch and set your temporary keys and token. This command uses your profile (e.g., saml-pub) to authenticate and then prints the export commands for your temporary credentials. The eval command executes them.
+You must have your region set. You only need to do this once per session.
 
 ```shell
 export AWS_REGION=us-west-2
+```
+
+#### 2\. Export Credentials from Your Profile
+
+Use the `aws configure export-credentials` command to fetch and set your temporary keys and token. This command uses your profile (e.g., `saml-pub`) to authenticate and then prints the `export` commands for your temporary credentials. The `eval` command executes them.
+
+```shell
 eval $(aws configure export-credentials --format env --profile saml-pub)
 ```
 
-This single command will set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN in your terminal.
+This single command will set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` in your terminal.
 
-### Sample Commands
+-----
+
+## Sample Commands
 
   * **Get info for all subdatasets (local file):**
 
@@ -61,6 +69,7 @@ This single command will set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_S
   * **Get info for a specific subdataset (from S3):**
 
     ```shell
+    # Assumes AWS env vars are set per the "AWS Authentication" section above
     gdalinfo 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/GSLC/swaths/frequencyA/HH'
     ```
 
@@ -80,6 +89,7 @@ This single command will set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_S
         'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
         output_warped.tif
     ```
+
 
 ## Building from Source
 
@@ -142,7 +152,6 @@ make && make install
 
   * **Driver Registration:** The driver is registered via `GDALRegister_NISAR()`, which is invoked when GDAL loads the plugin. This function creates and configures a `GDALDriver` object, assigning the static `NisarDataset::Open` method to the `pfnOpen` function pointer. This makes the driver available for use within the GDAL ecosystem.
 
-
 ## Visualization & Validation
 
 The compiled plugin allows NISAR HDF5 files to be opened directly in any GDAL-compatible software, such as **QGIS**, for visualization and analysis.
@@ -159,3 +168,6 @@ The compiled plugin allows NISAR HDF5 files to be opened directly in any GDAL-co
       * [https://github.com/aivazis/qed/tree/main/pkg/readers/nisar](https://github.com/aivazis/qed/tree/main/pkg/readers/nisar)
       * [https://github.com/aivazis/qed](https://github.com/aivazis/qed)
       * [https://github.com/pyre/pyre](https://github.com/pyre/pyre)
+
+```
+```
