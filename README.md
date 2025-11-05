@@ -46,9 +46,8 @@ You must have your region set. You only need to do this once per session. Use th
 ```shell
 export AWS_REGION=us-west-2
 eval $(aws configure export-credentials --format env --profile saml-pub)
-This single command will set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN in your terminal.
 ```
-
+This single command will set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_SESSION_TOKEN in your terminal.
 
 ### Sample Commands
 
