@@ -10,7 +10,7 @@ A read-only GDAL driver for NISAR L-band and S-band(future) HDF5 products, with 
   * **Level 1 (RSLC) Support:** Automatically generates Ground Control Points (GCPs) from the `geolocationGrid` for accurate reprojection.
   * **Level 2 (GCOV/GSLC) Support:** Correctly reads georeferencing (GeoTransform and Spatial Reference) for all datasets, including auxiliary metadata layers.
   * **Cloud-Optimized Access:** Leverages the HDF5 ROS3 VFD (Read-Only S3 Virtual File Driver) to efficiently read data directly from cloud object stores using `s3://` or `/vsis3/` paths.
-  * **AWS Authentication:** Supports AWS credentials via explicit environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`).
+  * **AWS Authentication:** Supports AWS credentials via environment variables (`AWS_SESSION_TOKEN, etc.`)
   * **Full GDAL Integration:** Enables use with standard utilities like `gdalinfo`, `gdal_translate`, and `gdalwarp`.
 
 ## Installation
@@ -21,7 +21,7 @@ The recommended way to install this plugin is via the conda package manager from
 conda install -c nisar-forge -c conda-forge gdal-driver-nisar
 ```
 
-## AWS Authentication
+## AWS Authentication (Command-Line / Shell)
 
 Accessing files from S3 requires AWS credentials. This driver is built on the high-performance HDF5 ROS3 (Read-Only S3) Virtual File Driver, which provides optimized, chunked reads directly from cloud storage.
 
@@ -56,93 +56,139 @@ eval $(aws configure export-credentials --format env --profile saml-pub)
 
 This single command will set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` in your terminal.
 
------
+### Sample Commands
 
-## Sample Commands
-
-  * **Get info for all subdatasets (local file):**
-
-    ```shell
-    gdalinfo NISAR:/path/to/local/NISAR_L2_file.h5
-    ```
-
-  * **Get info for a specific subdataset (from S3):**
-
-    ```shell
-    # Assumes AWS env vars are set per the "AWS Authentication" section above
-    gdalinfo 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/GSLC/swaths/frequencyA/HH'
-    ```
-
-  * **Convert a specific L2 subdataset to GeoTIFF:**
-
-    ```shell
-    gdal_translate -of GTiff \
-        'NISAR:/path/to/local/L2_GCOV_file.h5:/science/LSAR/GCOV/grids/frequencyA/HHHH' \
-        output_HHHH.tif
-    ```
-
-  * **Warp an L1 subdataset to a GeoTIFF using GCPs:**
-
-    ```shell
-    # Use -tps for high accuracy, or -order 2 for a fast preview
-    gdalwarp -t_srs EPSG:4326 -tps -r cubic \
-        'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
-        output_warped.tif
-    ```
-
-
-## Building from Source
-
-If you need to build the plugin from the latest source code, the recommended method is to build the conda package yourself.
-
-### Building with Conda (Recommended)
-
-Platform-specific instructions for creating the conda packages for both `osx-arm64` and `linux-64` are available in **[BUILDING.md]**. This is the preferred method as it handles all dependencies automatically.
-
-### Manual Build (Advanced)
-
-Building the plugin manually requires first compiling a compatible HDF5 library with ROS3 VFD support.
-
-**1. Build HDF5 Library:**
-
-  * **Prerequisites:**
-
-    ```shell
-    # On Red Hat / AlmaLinux
-    sudo dnf install openssl-devel libcurl-devel
-    ```
-
-  * **Configure and Compile:**
-
-    ```shell
-    # Download and extract HDF5 source
-    ./configure --prefix=/usr/local/hdf5 \
-                --enable-cxx \
-                --enable-ros3-vfd
-
-    make && sudo make install
-    ```
-
-    *Verify the ROS3 VFD is enabled by running `h5cc -showconfig` and checking for `(Read-Only) S3 VFD: yes`.*
-
-**2. Build the Plugin:**
-
-Once HDF5 is installed, you can compile the plugin using CMake.
+#### Get info for all subdatasets (local file)
 
 ```shell
-mkdir build && cd build
-cmake .. -DCMAKE_INSTALL_PREFIX=/path/to/install
-make && make install
+gdalinfo NISAR:/path/to/local/NISAR_L2_file.h5
+```
+
+#### Get info for a specific subdataset (from S3)
+
+```shell
+# Assumes AWS env vars are set per the "AWS Authentication" section above
+gdalinfo 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/GSLC/swaths/frequencyA/HH'
+```
+
+#### Convert a specific L2 subdataset to GeoTIFF
+
+```shell
+gdal_translate -of GTiff \
+    'NISAR:/path/to/local/L2_GCOV_file.h5:/science/LSAR/GCOV/grids/frequencyA/HHHH' \
+    output_HHHH.tif
+```
+
+#### Warp an L1 subdataset to a GeoTIFF (high accuracy)
+
+```shell
+# Use -tps for the most accurate reprojection
+gdalwarp -t_srs EPSG:4326 -tps -r cubic \
+    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
+    output_warped_high_accuracy.tif
+```
+
+#### Warp an L1 subdataset to a GeoTIFF (fast preview)
+
+```shell
+# Use -order 2 for a fast preview
+gdalwarp -t_srs EPSG:4326 -order 2 -r cubic \
+    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
+    output_warped_preview.tif
+```
+
+## AWS Authentication (Jupyter Notebook / Python)
+
+Jupyter Notebook kernels are separate processes and **do not** inherit environment variables from user's terminal. User must set the credentials *inside the notebook* using Python.
+
+The recommended solution is to use the **Boto3** library (the AWS SDK for Python) to fetch the credentials and set them for your notebook's environment.
+
+### Recommended Workflow
+
+#### 1\. Install Boto3
+
+If you haven't already, install `boto3` into your Conda environment:
+
+```shell
+mamba install boto3
+```
+
+#### 2\. Run This Code in the First Cell
+
+Place the following code in the **first cell** of your notebook and run it. It will use your AWS profile to get temporary credentials and set the four required environment variables for your driver.
+
+```python
+import os
+import boto3
+from osgeo import gdal
+
+# Boto3 Authentication
+# Set this to the name of your AWS profile
+PROFILE_NAME = 'saml-pub' 
+
+print(f"Attempting to get credentials for AWS profile: '{PROFILE_NAME}'...")
+
+try:
+    # This creates a session using your ~/.aws/config
+    session = boto3.Session(profile_name=PROFILE_NAME)
+    
+    # This call may trigger a browser window to pop up for SAML/SSO login
+    creds = session.get_credentials()
+    
+    # Set the explicit environment variables that the HDF5 ROS3 driver needs
+    os.environ['AWS_ACCESS_KEY_ID'] = creds.access_key
+    os.environ['AWS_SECRET_ACCESS_KEY'] = creds.secret_key
+    os.environ['AWS_SESSION_TOKEN'] = creds.token
+    
+    # Also grab the region from the session
+    if session.region_name:
+        os.environ['AWS_REGION'] = session.region_name
+    else:
+        # Fallback in case the profile doesn't have a default region
+        print("Warning: No region set in profile. Set AWS_REGION manually.")
+        # os.environ['AWS_REGION'] = 'us-west-2' # Set manually if needed
+
+    print("Successfully set AWS credentials in the notebook environment.")
+
+except Exception as e:
+    print(f"Error during AWS authentication: {e}")
+    print("Please ensure your AWS profile is correct and you are logged in.")
+    # Stop execution if auth fails
+    raise
+```
+
+#### 3\. Run GDAL Code in a Second Cell
+
+Now that the environment is set, you can run your GDAL code in any subsequent cell.
+
+```python
+# Run Your GDAL Code
+from osgeo import gdal
+
+gdal.UseExceptions()
+
+file_path = 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH'
+print(f"\nAttempting to open dataset: {file_path}")
+
+try:
+    ds = gdal.Open(file_path)
+    if ds:
+        print("Successfully opened the dataset with GDAL!")
+        print(ds.GetMetadata())
+    else:
+        print("gdal.Open() failed.")
+
+except Exception as e:
+    print(f"An error occurred during gdal.Open: {e}")
 ```
 
 ## C++ Implementation Details
 
-  * **`NisarDataset` (subclass of `GDALDataset`):** This class serves as the main entry point for interacting with a NISAR HDF5 file.
-
+      * **`NisarDataset` (subclass of `GDALDataset`):** This class serves as the main entry point for interacting with a NISAR HDF5 file.
       * **Core Functionality:** As a subclass of `GDALDataset`, it represents the entire file. It is responsible for parsing the user-provided connection string, which can be a path to a local file or an S3 URL.
       * **Data Access:** It can open a specific data path (e.g., `/science/LSAR/GSLC/swaths/frequencyA/HH`) within the HDF5 file. If no specific path is given, it will automatically search the file for compatible raster datasets and present them as GDAL subdatasets.
       * **Georeferencing:** It extracts the spatial reference system (SRS) and calculates the geotransform, enabling GDAL to correctly position the raster in geographic space.
-      * **Metadata:** It reads and exposes metadata both from the global level of the HDF5 file (in a custom `NISAR_GLOBAL` domain) and from the specific raster dataset being accessed.
+      * **Metadata:** It reads and exposes metadata from the HDF5 file. For container datasets, it reads file-level metadata. For raster datasets, it reads both dataset-specific attributes and relevant auxiliary metadata (e.g., `numberOfSubSwaths`).
 
   * **`NisarRasterBand` (subclass of `GDALRasterBand`):** This class represents a single band of raster data (e.g., the HH polarization).
 
@@ -152,9 +198,6 @@ make && make install
 
   * **Driver Registration:** The driver is registered via `GDALRegister_NISAR()`, which is invoked when GDAL loads the plugin. This function creates and configures a `GDALDriver` object, assigning the static `NisarDataset::Open` method to the `pfnOpen` function pointer. This makes the driver available for use within the GDAL ecosystem.
 
-## Visualization & Validation
-
-The compiled plugin allows NISAR HDF5 files to be opened directly in any GDAL-compatible software, such as **QGIS**, for visualization and analysis.
 
 ## Data & Specifications
 
@@ -168,6 +211,3 @@ The compiled plugin allows NISAR HDF5 files to be opened directly in any GDAL-co
       * [https://github.com/aivazis/qed/tree/main/pkg/readers/nisar](https://github.com/aivazis/qed/tree/main/pkg/readers/nisar)
       * [https://github.com/aivazis/qed](https://github.com/aivazis/qed)
       * [https://github.com/pyre/pyre](https://github.com/pyre/pyre)
-
-```
-```
