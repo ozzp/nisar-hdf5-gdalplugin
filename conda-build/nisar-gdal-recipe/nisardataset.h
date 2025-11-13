@@ -16,14 +16,16 @@
 #include <string>
 #include <vector>
 #include <mutex>
-#include <cstring> // For memcpy
+#include <cstring>  // For memcpy
 #include "cpl_string.h"
 #include "cpl_error.h"
 #include "cpl_list.h"
+#include "cpl_conv.h"  // For CPLsetenv, CPLMalloc, etc.
 #include "ogr_spatialref.h"
 #include "hdf5.h"
 #include "gdal_pam.h"
-#include "gdal.h" // Include GDAL header for CPLErr and error codes
+#include "gdal_priv.h"
+#include "gdal.h"  // Include GDAL header for CPLErr and error codes
 
 /**************************************************************************/
 /* ====================================================================   */
@@ -45,44 +47,58 @@ class NisarDataset : public GDALPamDataset
     hid_t hHDF5 = -1;
     hid_t hDataset = -1;
     char *pszFilename = nullptr;
-    GDALDataType eDataType = GDT_Unknown; // Has default initializer
-    char **papszSubDatasets = nullptr;    // Has default initializer
+    GDALDataType eDataType = GDT_Unknown;  // Has default initializer
+    char **papszSubDatasets = nullptr;     // Has default initializer
 
     // Caching Flags (Declare together)
-    mutable bool m_bGotSRS = false; //Flag indicating if SRS was fetched
+    mutable bool m_bGotSRS = false;  //Flag indicating if SRS was fetched
     mutable bool m_bGotGlobalMetadata = false;
-    mutable bool m_bGotMetadata = false; // Flag for default domain HDF5 read
+    mutable bool m_bGotMetadata = false;  // Flag for default domain HDF5 read
     // mutable bool m_bGotGeoTransform = false; // If caching GT
     //
     // Cached Objects / Data (Declare together)
-    mutable OGRSpatialReference *m_poSRS = nullptr;   // Cached SRS object
-    mutable char **m_papszGlobalMetadata = nullptr; // Cached list for global attrs
+    mutable OGRSpatialReference *m_poSRS = nullptr;  // Cached SRS object
+    mutable char **m_papszGlobalMetadata =
+        nullptr;  // Cached list for global attrs
 
     // Mutexes (Declare together, last among cached members)
     mutable std::mutex m_SRSMutex;
     mutable std::mutex m_GlobalMetadataMutex;
     mutable std::mutex m_MetadataMutex;
 
-  private: // Keep static helpers private if only used internally
+  private:  // Keep static helpers private if only used internally
     static GDALDataType GetGDALDataType(hid_t hH5Type);
+    CPLErr GetGeoTransform_Logic(GDALGeoTransform &gt);
+    CPLErr ReadGeoTransformAttribute(hid_t hObjectID, const char *pszAttrName,
+                                     GDALGeoTransform &gt) const;
 
   public:
-      NisarDataset();
-     ~NisarDataset() override;
+    NisarDataset();
+    ~NisarDataset() override;
 
-    static GDALDataset *Open( GDALOpenInfo * );
+    static GDALDataset *Open(GDALOpenInfo *);
 
     // Public Getters needed by NisarRasterBand (or using friend)
-    hid_t GetHDF5Handle() const { return hHDF5; }
-    hid_t GetDatasetHandle() const { return hDataset; }
+    hid_t GetHDF5Handle() const
+    {
+        return hHDF5;
+    }
+
+    hid_t GetDatasetHandle() const
+    {
+        return hDataset;
+    }
 
     //virtual CPLErr GetRasterBand( int nBand, GDALRasterBand ** ppBand );
     char **GetMetadataDomainList() override;
-    char **GetMetadata( const char * pszDomain = "") override;
-    CPLErr GetGeoTransform( double * padfTransform ) override;
+    char **GetMetadata(const char *pszDomain = "") override;
+    //CPLErr GetGeoTransform( double * padfTransform ) override;
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
     const OGRSpatialReference *GetSpatialRef() const override;
-    CPLErr GenerateGCPsFromGeolocationGrid(const char* pszProductGroup);
+
+    //const OGRSpatialReference *GetSpatialRef() const override;
+    CPLErr GenerateGCPsFromGeolocationGrid(const char *pszProductGroup);
     char **GetFileList() override;
 };
 
-#endif //NISAR_DATASET_H
+#endif  //NISAR_DATASET_H

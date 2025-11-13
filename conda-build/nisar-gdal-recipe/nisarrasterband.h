@@ -30,33 +30,37 @@ class NisarDataset;
 /* data blocks (IReadBlock) and retrieving NoData values (GetNoDataValue). */
 /************************************************************************/
 
-class NisarRasterBand final: public GDALPamRasterBand
+class NisarRasterBand final : public GDALPamRasterBand
 {
     friend class NisarDataset;
+
   private:
-    hid_t hH5Type = -1; // Store copy of HDF5 native data type
+    hid_t hH5Type = -1;  // Store copy of HDF5 native data type
     // Cached HDF5 handles
-    hid_t m_hFileSpaceID = -1; // Cached filespace for the HDF5 dataset
-    hid_t m_hMemSpaceID = -1;  // Cached memory space for a full block
+    hid_t m_hFileSpaceID = -1;  // Cached filespace for the HDF5 dataset
+    hid_t m_hMemSpaceID = -1;   // Cached memory space for a full block
 
     // Metadata caching members for this band
-    mutable char **m_papszMetadata = nullptr; // Cached merged metadata (includes HDF5 attrs)
-    mutable bool m_bMetadataRead = false;    // Flag: Have we read HDF5 attrs for default domain?
-    mutable std::mutex m_MetadataMutex;      // Mutex for metadata access
+    mutable char **m_papszMetadata =
+        nullptr;  // Cached merged metadata (includes HDF5 attrs)
+    mutable bool m_bMetadataRead =
+        false;  // Flag: Have we read HDF5 attrs for default domain?
+    mutable std::mutex m_MetadataMutex;  // Mutex for metadata access
 
   public:
-    NisarRasterBand(NisarDataset *poDSIn, int nBandIn, hid_t hDatasetID, hid_t hH5DatasetType);
-    NisarRasterBand( NisarDataset *poDS, int nBand );
+    NisarRasterBand(NisarDataset *poDSIn, int nBandIn, hid_t hDatasetID,
+                    hid_t hH5DatasetType);
+    NisarRasterBand(NisarDataset *poDS, int nBand);
     virtual ~NisarRasterBand() override;
-    virtual CPLErr IReadBlock( int nBlockXOff, int nBlockYOff,
-                                void * pImage ) override;
-    double GetNoDataValue( int *pbSuccess = nullptr ) override;
+    virtual CPLErr IReadBlock(int nBlockXOff, int nBlockYOff,
+                              void *pImage) override;
+    double GetNoDataValue(int *pbSuccess = nullptr) override;
     // Add Metadata override
-    char **GetMetadata( const char * pszDomain = "" ) override;
+    char **GetMetadata(const char *pszDomain = "") override;
 
     // Add getter if needed outside
     // hid_t GetH5Type() const { return hH5Type; }
-    
+
     //virtual GDALRasterBand *GetOverview( int nOverviewIndex ) override;
     //virtual int GetOverviewCount() override;
     //GDALColorInterp GetColorInterpretation() override;
@@ -67,4 +71,4 @@ class NisarRasterBand final: public GDALPamRasterBand
     //virtual GDALDataType GetRasterDataType(void) const override;
 };
 
-#endif // NISAR_RASTER_BAND_H
+#endif  // NISAR_RASTER_BAND_H
