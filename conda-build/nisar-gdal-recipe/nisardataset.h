@@ -58,15 +58,28 @@ class NisarDataset : public GDALPamDataset
     //
     // Cached Objects / Data (Declare together)
     mutable OGRSpatialReference *m_poSRS = nullptr;  // Cached SRS object
-    mutable char **m_papszGlobalMetadata =
-        nullptr;  // Cached list for global attrs
+    // Cached list for global attrs
+    mutable char **m_papszGlobalMetadata = nullptr;
 
     // Mutexes (Declare together, last among cached members)
     mutable std::mutex m_SRSMutex;
     mutable std::mutex m_GlobalMetadataMutex;
     mutable std::mutex m_MetadataMutex;
 
+    // Product identification
+    std::string m_sProductType; // e.g., "GSLC", "RSLC"
+    bool m_bIsLevel1 = false;
+    bool m_bIsLevel2 = false;
+
+    // Open options used
+    std::string m_sInst; // LSAR or SSAR
+    std::string m_sFreq; // A or B
+    std::string m_sPol;  // HH, HV, etc.
+
   private:  // Keep static helpers private if only used internally
+    void ReadIdentificationMetadata();
+    std::string ReadHDF5StringArrayAsList(hid_t hParentGroup, const char *pszDatasetName);
+    std::string ReadHDF5StringDataset(hid_t hParentGroup, const char *pszDatasetName);
     static GDALDataType GetGDALDataType(hid_t hH5Type);
     CPLErr GetGeoTransform_Logic(GDALGeoTransform &gt);
     CPLErr ReadGeoTransformAttribute(hid_t hObjectID, const char *pszAttrName,
@@ -75,6 +88,8 @@ class NisarDataset : public GDALPamDataset
   public:
     NisarDataset();
     ~NisarDataset() override;
+
+    static int Identify(GDALOpenInfo *poOpenInfo);
 
     static GDALDataset *Open(GDALOpenInfo *);
 

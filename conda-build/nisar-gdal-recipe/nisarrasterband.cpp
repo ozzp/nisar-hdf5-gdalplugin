@@ -90,10 +90,37 @@ NisarRasterBand::NisarRasterBand( NisarDataset *poDSIn, int nBandIn ) :
 
     // Create and cache HDF5 dataspace handles
     m_hFileSpaceID = H5Dget_space(hDatasetID);
+    
+    // Get the rank of the file dataspace
+    int rank = -1;
+    if( m_hFileSpaceID >= 0 )
+        rank = H5Sget_simple_extent_ndims(m_hFileSpaceID);
 
-    hsize_t mem_dims[2] = {static_cast<hsize_t>(nBlockYSize),
-                           static_cast<hsize_t>(nBlockXSize)};
-    m_hMemSpaceID = H5Screate_simple(2, mem_dims, NULL);
+    if (rank < 2)
+    {
+        CPLError(CE_Failure, CPLE_AppDefined, "NisarRasterBand: Dataset rank is %d, but must be >= 2.", rank);
+        // Set handles to invalid so IReadBlock will fail
+        if (m_hFileSpaceID >= 0) H5Sclose(m_hFileSpaceID);
+        m_hFileSpaceID = -1; 
+        m_hMemSpaceID = -1;
+        return;
+    }
+
+    // Create a memory dataspace with the *same rank* as the file dataspace
+    std::vector<hsize_t> mem_dims(rank);
+    
+    // Set the block dimensions for Y and X
+    mem_dims[rank - 2] = static_cast<hsize_t>(nBlockYSize);
+    mem_dims[rank - 1] = static_cast<hsize_t>(nBlockXSize);
+    
+    // Set all higher dimensions to 1 (we will read one "slice" at a time)
+    for (int i = 0; i < rank - 2; ++i)
+    {
+        mem_dims[i] = 1;
+    }
+
+    // Create the N-D memory dataspace
+    m_hMemSpaceID = H5Screate_simple(rank, mem_dims.data(), NULL);
 }
 
 NisarRasterBand::~NisarRasterBand()
@@ -228,11 +255,22 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     // of the buffer, leaving the rest untouched (already filled with 0).
     if (nActualBlockXSize < nBlockXSize || nActualBlockYSize < nBlockYSize)
     {
-        hsize_t mem_start[2] = {0, 0};
-        hsize_t mem_count[2] = {static_cast<hsize_t>(nActualBlockYSize),
-                                static_cast<hsize_t>(nActualBlockXSize)};
-        status = H5Sselect_hyperslab(m_hMemSpaceID, H5S_SELECT_SET, mem_start,
-                                     nullptr, mem_count, nullptr);
+        // Create N-D memory selection
+        std::vector<hsize_t> mem_start(rank, 0); // Start at {0, 0, ... 0}
+        std::vector<hsize_t> mem_count(rank);
+
+        // Set dimensions for Y and X
+        mem_count[rank - 2] = static_cast<hsize_t>(nActualBlockYSize);
+        mem_count[rank - 1] = static_cast<hsize_t>(nActualBlockXSize);
+
+        // Set higher dimensions to 1
+        for (int i = 0; i < rank - 2; ++i)
+        {
+            mem_count[i] = 1;
+        }
+
+        status = H5Sselect_hyperslab(m_hMemSpaceID, H5S_SELECT_SET, mem_start.data(),
+                                     nullptr, mem_count.data(), nullptr);
         if (status < 0) return CE_Failure;
     } else {
         // For a full block, select the entire memory space.

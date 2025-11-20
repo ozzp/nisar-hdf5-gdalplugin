@@ -48,5 +48,7 @@ void GDALRegister_NISAR()
 
     poDriver->pfnOpen = NisarDataset::Open;
 
+    poDriver->pfnIdentify = NisarDataset::Identify;
+
     GetGDALDriverManager()->RegisterDriver( poDriver );
 }

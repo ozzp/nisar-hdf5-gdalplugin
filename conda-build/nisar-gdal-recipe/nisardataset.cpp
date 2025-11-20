@@ -26,6 +26,395 @@
 #include "hdf5.h"
 #include "H5FDros3.h"  // For H5FD_ros3_fapl_t and H5FD_CURR_ROS3_FAPL_T_VERSION
 
+/**
+ * \brief Helper function to read a 1D array of HDF5 strings.
+ *
+ * Reads a 1D array of fixed-length strings and returns them
+ * as a single, comma-separated std::string.
+ * Returns an empty std::string on failure.
+ */
+std::string NisarDataset::ReadHDF5StringArrayAsList(hid_t hParentGroup,
+                                                    const char *pszDatasetName)
+{
+    std::string sResult;
+    hid_t hDataset = -1;
+    hid_t hType = -1;
+    hid_t hSpace = -1;
+    hid_t hMemType = -1;
+    char *pszBuffer = nullptr;
+    hsize_t nStrings = 0;
+    size_t nStringSize = 0; // Size of string in *file*
+    size_t nMemStringSize = 0; // Size of string in *memory*
+    int ndims = 0;
+
+    std::ostringstream oss;
+
+    // Suppress HDF5 errors for this read attempt
+    H5E_auto2_t old_func;
+    void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+    // Open dataset
+    hDataset = H5Dopen2(hParentGroup, pszDatasetName, H5P_DEFAULT);
+    if (hDataset < 0)
+    {
+        goto cleanup_and_restore; // Failed to open dataset
+    }
+
+    // Get type and verify it's a string
+    hType = H5Dget_type(hDataset);
+    if (hType < 0 || H5Tget_class(hType) != H5T_STRING)
+    {
+        goto cleanup_and_restore; // Not a string
+    }
+    
+    // Size of one string element IN THE FILE
+    nStringSize = H5Tget_size(hType); 
+    if (nStringSize == 0) nStringSize = 1;
+
+    // Get space and verify it's 1D
+    hSpace = H5Dget_space(hDataset);
+    if (hSpace < 0)
+    {
+         goto cleanup_and_restore;
+    }
+    ndims = H5Sget_simple_extent_ndims(hSpace);
+    if (ndims != 1)
+    {
+        // This helper only supports 1D arrays
+        goto cleanup_and_restore;
+    }
+
+    // Get number of strings in the 1D array
+    H5Sget_simple_extent_dims(hSpace, &nStrings, nullptr);
+    if (nStrings == 0)
+    {
+        goto cleanup_and_restore; // Empty array
+    }
+    
+    // We want to read each fixed-length string of size N
+    // into a C-string buffer of size N+1 (for the null terminator).
+    nMemStringSize = nStringSize + 1;
+    
+    hMemType = H5Tcopy(H5T_C_S1);
+    H5Tset_size(hMemType, nMemStringSize);
+        
+    // Read the entire array of strings
+    // HDF5 will read each nStringSize-byte string from the file
+    // and place it into a (nStringSize+1)-byte slot in pszBuffer,
+    // adding the null terminator for us.
+    pszBuffer = (char *)CPLMalloc(nStrings * nMemStringSize);
+    if (H5Dread(hDataset, hMemType, H5S_ALL, H5S_ALL, H5P_DEFAULT, pszBuffer) < 0)
+    {
+        goto cleanup_and_restore; // Read failed
+    }
+
+    // Iterate, and append
+    for (hsize_t i = 0; i < nStrings; ++i)
+    {
+        // Point to the beginning of the i-th *null-terminated* string
+        const char* pszSourceString = pszBuffer + (i * nMemStringSize);
+        
+        oss << pszSourceString;
+        if (i < nStrings - 1)
+        {
+            oss << ","; // Add comma separator
+        }
+    }
+    sResult = oss.str();
+
+cleanup_and_restore:
+    // Restore HDF5 error handling
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+
+    // Clean up all resources
+    CPLFree(pszBuffer);
+    if (hMemType >= 0)
+        H5Tclose(hMemType);
+    if (hSpace >= 0)
+        H5Sclose(hSpace);
+    if (hType >= 0)
+        H5Tclose(hType);
+    if (hDataset >= 0)
+        H5Dclose(hDataset);
+
+    return sResult;
+}
+/**
+ * \brief Helper function to read a scalar HDF5 string dataset.
+ *
+ * Assumes the dataset contains a single, fixed-length string.
+ * Returns an empty std::string on failure.
+ */
+std::string NisarDataset::ReadHDF5StringDataset(hid_t hParentGroup,
+                                                const char *pszDatasetName)
+{
+    std::string sResult;
+    hid_t hDataset = -1;
+    hid_t hType = -1;
+    hid_t hSpace = -1;
+    hid_t hMemType = -1;
+    char *pszBuffer = nullptr;
+    size_t nSize = 0; // Declared at top
+
+    // Suppress HDF5 errors for this read attempt
+    H5E_auto2_t old_func;
+    void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+    // Open dataset
+    hDataset = H5Dopen2(hParentGroup, pszDatasetName, H5P_DEFAULT);
+    if (hDataset < 0)
+    {
+        goto cleanup_and_restore; // Failed to open dataset
+    }
+
+    // Get type and verify it's a string
+    hType = H5Dget_type(hDataset);
+    if (hType < 0 || H5Tget_class(hType) != H5T_STRING)
+    {
+        goto cleanup_and_restore; // Not a string
+    }
+
+    // Get string size
+    nSize = H5Tget_size(hType);
+    if (nSize == 0)
+    {
+        nSize = 1; // Safety
+    }
+
+    // Get space and verify it's scalar
+    hSpace = H5Dget_space(hDataset);
+    if (hSpace < 0 || H5Sget_simple_extent_ndims(hSpace) != 0)
+    {
+        // Note: This helper only supports scalar strings, not arrays of strings
+        goto cleanup_and_restore;
+    }
+
+    // Create memory type for reading
+    hMemType = H5Tcopy(H5T_C_S1);
+    H5Tset_size(hMemType, nSize + 1); // +1 for null terminator
+
+    // Read the string
+    pszBuffer = (char *)CPLMalloc(nSize + 1);
+    if (H5Dread(hDataset, hMemType, H5S_ALL, H5S_ALL, H5P_DEFAULT, pszBuffer) >= 0)
+    {
+        pszBuffer[nSize] = '\0'; // Ensure null termination
+        sResult = pszBuffer;
+    }
+
+cleanup_and_restore:
+    // Restore HDF5 error handling
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+
+    // Clean up all resources
+    CPLFree(pszBuffer);
+    if (hMemType >= 0)
+        H5Tclose(hMemType);
+    if (hSpace >= 0)
+        H5Sclose(hSpace);
+    if (hType >= 0)
+        H5Tclose(hType);
+    if (hDataset >= 0)
+        H5Dclose(hDataset);
+
+    return sResult;
+}
+
+/************************************************************************/
+/* Identify()                                                           */
+/************************************************************************/
+
+int NisarDataset::Identify(GDALOpenInfo *poOpenInfo)
+{
+    const char *pszPrefix = "NISAR:";
+    size_t nPrefixLen = strlen(pszPrefix);
+    
+    // 1. Check for explicit driver prefix "NISAR:"
+    if (EQUALN(poOpenInfo->pszFilename, pszPrefix, nPrefixLen))
+    {
+        // REQUIREMENT: Contain ".h5" anywhere, not necessarily at the end.
+        // This supports both:
+        //   "NISAR:product.h5"
+        //   "NISAR:product.h5:/science/LSAR/..." (Subdataset path)
+        CPLString osFilename = poOpenInfo->pszFilename;
+        if (osFilename.ifind(".h5") != std::string::npos)
+        {
+            return TRUE;
+        }
+        // If it starts with NISAR: but doesn't look like an HDF5 file, reject it.
+        return FALSE;
+    }
+
+    // 2. Check for standard .h5 file extension (Automatic Detection without prefix)
+    // For files NOT starting with NISAR:, we strictly require the extension.
+    if (!EQUAL(CPLGetExtensionSafe(poOpenInfo->pszFilename).c_str(), "h5"))
+    {
+        return FALSE;
+    }
+
+    // 3. Check if it's a remote file (Heuristic)
+    // Remote files might not allow H5Fopen checks efficiently
+    bool bIsRemote = STARTS_WITH_CI(poOpenInfo->pszFilename, "s3://") ||
+                     STARTS_WITH_CI(poOpenInfo->pszFilename, "/vsis3/") ||
+                     STARTS_WITH_CI(poOpenInfo->pszFilename, "http://") ||
+                     STARTS_WITH_CI(poOpenInfo->pszFilename, "https://");
+
+    if (bIsRemote)
+    {
+        // Heuristic: If it's a remote .h5 file and "NISAR" is in the name, claim it.
+        CPLString osFilename = poOpenInfo->pszFilename;
+        if (osFilename.ifind("NISAR") != std::string::npos)
+        {
+            return TRUE;
+        }
+        return FALSE; 
+    }
+
+    // 4. Local File Deep Check
+    // It's a local .h5 file. Open it to verify it is actually NISAR data.
+    
+    // Suppress HDF5 errors
+    H5E_auto2_t old_func;
+    void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+    // Check if it's HDF5
+    htri_t bIsHDF5 = H5Fis_hdf5(poOpenInfo->pszFilename);
+    if (bIsHDF5 <= 0)
+    {
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+        return FALSE;
+    }
+
+    // Check for NISAR structure
+    bool bIsNisar = false;
+    hid_t hFile = H5Fopen(poOpenInfo->pszFilename, H5F_ACC_RDONLY, H5P_DEFAULT);
+    if (hFile >= 0)
+    {
+        // Check for the signature NISAR groups
+        if (H5Lexists(hFile, "/science/LSAR/identification", H5P_DEFAULT) > 0 ||
+            H5Lexists(hFile, "/science/SSAR/identification", H5P_DEFAULT) > 0)
+        {
+            bIsNisar = true;
+        }
+        H5Fclose(hFile);
+    }
+
+    // Restore HDF5 errors
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+
+    return bIsNisar;
+}
+/************************************************************************/
+/* ReadIdentificationMetadata()                     */
+/************************************************************************/
+/**
+ * \brief Reads essential identification metadata.
+ *
+ * This function is called from NisarDataset::Open() immediately after
+ * the HDF5 file is opened. It finds the /science/[LSAR|SSAR]/identification
+ * group and reads the productType and productLevel datasets to populate
+ * the corresponding member variables (m_sProductType, m_sInst, etc.).
+ * This is necessary for the Open() function to determine which
+ * HDF5 dataset to open (e.g., L1 swaths vs L2 grids).
+ */
+void NisarDataset::ReadIdentificationMetadata()
+{
+    // Reset flags
+    m_sInst.clear();
+    m_sProductType.clear();
+    m_bIsLevel1 = false;
+    m_bIsLevel2 = false;
+
+    if (hHDF5 < 0)
+    {
+        CPLError(CE_Warning, CPLE_AppDefined,
+                 "ReadIdentificationMetadata: HDF5 file is not open.");
+        return;
+    }
+
+    hid_t hIdentGroup = -1;
+    std::string sIdentPath;
+
+    // Suppress HDF5 errors while probing for paths
+    H5E_auto2_t old_func;
+    void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+    // Check for LSAR
+    if (H5Lexists(hHDF5, "/science/LSAR/identification", H5P_DEFAULT) > 0)
+    {
+        sIdentPath = "/science/LSAR/identification";
+        m_sInst = "LSAR";
+    }
+    // Check for SSAR
+    else if (H5Lexists(hHDF5, "/science/SSAR/identification", H5P_DEFAULT) > 0)
+    {
+        sIdentPath = "/science/SSAR/identification";
+        m_sInst = "SSAR";
+    }
+
+    if (m_sInst.empty())
+    {
+        CPLError(CE_Warning, CPLE_AppDefined,
+                 "Could not find /science/LSAR/identification or "
+                 "/science/SSAR/identification group in file.");
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore
+        return;
+    }
+
+    // Open the identified group
+    hIdentGroup = H5Gopen2(hHDF5, sIdentPath.c_str(), H5P_DEFAULT);
+    if (hIdentGroup < 0)
+    {
+        CPLError(CE_Warning, CPLE_AppDefined,
+                 "Found identification path '%s' but failed to open it.",
+                 sIdentPath.c_str());
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore
+        return;
+    }
+
+    // Read productType
+    m_sProductType = ReadHDF5StringDataset(hIdentGroup, "productType");
+
+    // Read productLevel
+    std::string sProductLevel = ReadHDF5StringDataset(hIdentGroup, "productLevel");
+
+    // Set flags based on productLevel
+    if (EQUAL(sProductLevel.c_str(), "L1"))
+    {
+        m_bIsLevel1 = true;
+    }
+    else if (EQUAL(sProductLevel.c_str(), "L2"))
+    {
+        m_bIsLevel2 = true;
+    }
+
+    // Restore HDF5 error handling
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+
+    // Cleanup
+    H5Gclose(hIdentGroup);
+
+    // Log results
+    CPLDebug("NISAR_DRIVER",
+             "Identified Product: INST=%s, Type=%s, Level=%s (L1=%d, L2=%d)",
+             m_sInst.c_str(), m_sProductType.c_str(), sProductLevel.c_str(),
+             m_bIsLevel1, m_bIsLevel2);
+
+    if (m_sProductType.empty() || sProductLevel.empty())
+    {
+        CPLError(CE_Warning, CPLE_AppDefined,
+                 "Failed to read 'productType' or 'productLevel' from %s",
+                 sIdentPath.c_str());
+    }
+}
+
 static std::string ReadStringAttribute(hid_t hLocation, const char *pszAttrName)
 {
     hid_t hAttr = H5Aopen(hLocation, pszAttrName, H5P_DEFAULT);
@@ -369,12 +758,16 @@ static herr_t NISAR_FindDatasetsVisitor(
 
     // Filter 2: Check if path starts with science/LSAR/
     // 'name' provided by H5Ovisit (when starting from root) is the full path *without* leading slash.
-    const char *requiredPrefix = "science/LSAR/";
-    if (strncmp(name, requiredPrefix, strlen(requiredPrefix)) != 0)
+    const char *lsarPrefix = "science/LSAR/";
+    const char *ssarPrefix = "science/SSAR/";
+
+    // Check if path starts with *either* prefix
+    if (strncmp(name, lsarPrefix, strlen(lsarPrefix)) != 0 &&
+        strncmp(name, ssarPrefix, strlen(ssarPrefix)) != 0)
     {
         CPLDebug("NISAR_VISITOR_DETAIL",
-                 "--> Skipping '%s' (Path does not start with %s)", name,
-                 requiredPrefix);
+                 "--> Skipping '%s' (Path does not start with %s or %s)", name,
+                 lsarPrefix, ssarPrefix);
         return H5_ITER_CONT;  // Skip datasets outside the main science group
     }
 
@@ -745,7 +1138,9 @@ NisarDataset::NisarDataset()
       m_bGotSRS(false),  // Initialize SRS flag
       m_bGotMetadata(false),
       m_papszGlobalMetadata(nullptr),  // Initialize global metadata cache
-      m_bGotGlobalMetadata(false)      // Initialize global metadata flag
+      m_bGotGlobalMetadata(false),     // Initialize global metadata flag
+      m_bIsLevel1(false),
+      m_bIsLevel2(false)
 {
 
     // Initialize GT array cache if using caching pattern for it
@@ -1312,7 +1707,8 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
         char **papszHDFMetadata = nullptr;
 
         // Case 1: Level 1 Product (has GCPs)
-        if (GetGCPCount() > 0)
+        //if (GetGCPCount() > 0)
+        if (m_bIsLevel1)
         {
             CPLDebug(
                 "NISAR_DRIVER",
@@ -1324,15 +1720,16 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
             std::string frequencyGroup = "frequencyA";  // Default
 
             // Find the product's root path (e.g., "/science/LSAR/RSLC")
-            size_t start_pos = datasetPath.find("/science/LSAR/");
-            if (start_pos != std::string::npos)
+            // m_sInst ("LSAR" or "SSAR") and m_sProductType ("RSLC", etc.)
+            // were set during NisarDataset::Open()
+            if (m_sInst.empty() || m_sProductType.empty())
             {
-                size_t end_pos =
-                    datasetPath.find('/', start_pos + strlen("/science/LSAR/"));
-                if (end_pos != std::string::npos)
-                {
-                    productRootPath = datasetPath.substr(0, end_pos);
-                }
+                CPLError(CE_Warning, CPLE_AppDefined,
+                "Dataset product info not set. Cannot find L1 metadata.");
+            }
+            else
+            {
+                productRootPath = "/science/" + m_sInst + "/" + m_sProductType;
             }
 
             if (!productRootPath.empty())
@@ -1540,22 +1937,38 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
             callback_data.pszPrefix = "";  // Use an empty prefix for the root
             H5Aiterate2(this->hHDF5, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
                         NISAR_AttributeCallback, &callback_data);
-
-            CPLDebug("NISAR_DRIVER",
-                     "Reading default metadata from root group "
-                     "('/science/LSAR/identification') for container dataset.");
-            // Open the specific identification group
-            hid_t hIdentGroup = H5Gopen2(
-                this->hHDF5, "/science/LSAR/identification", H5P_DEFAULT);
-            if (hIdentGroup >= 0)
+            // For a container, m_sInst might not be set.
+            // We must find the correct identification group.
+            std::string sIdentPath;
+            if (H5Lexists(this->hHDF5, "/science/LSAR/identification", H5P_DEFAULT) > 0)
             {
-                callback_data.pszPrefix = "/science/LSAR/identification";
-                idx = 0;  //Reset the iterator index
-                H5Literate(hIdentGroup, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
-                           NISAR_DatasetMetadataCallback, &callback_data);
+                sIdentPath = "/science/LSAR/identification";
+            }
+            else if (H5Lexists(this->hHDF5, "/science/SSAR/identification", H5P_DEFAULT) > 0)
+            {
+                sIdentPath = "/science/SSAR/identification";
+            }
 
-                // Clean up the handle
-                H5Gclose(hIdentGroup);
+            if (!sIdentPath.empty())
+            {
+                CPLDebug("NISAR_DRIVER",
+                         "Reading default metadata from root group ('%s') for container dataset.",
+                          sIdentPath.c_str());
+                hid_t hIdentGroup = H5Gopen2(this->hHDF5, sIdentPath.c_str(), H5P_DEFAULT);
+                if (hIdentGroup >= 0)
+                {
+                    callback_data.pszPrefix = sIdentPath.c_str();
+                    idx = 0; //Reset the iterator index
+                    H5Literate(hIdentGroup, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
+                        NISAR_DatasetMetadataCallback, &callback_data);
+
+                    // Clean up the handle
+                    H5Gclose(hIdentGroup);
+                }
+            }
+            else
+            {
+                CPLDebug("NISAR_DRIVER", "No identification group found for container dataset.");
             }
         }
 
@@ -1588,6 +2001,24 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
 /* (dimensions, data type, etc.) using HDF5 API calls.                  */
 /* Creates raster bands (NisarRasterBand) for the dataset.             */
 /************************************************************************/
+// *********************************************************************
+// ** IMPORTANT AWS AUTHENTICATION FOR ROS3 VFD:                      **
+// ** This driver relies on the HDF5 ROS3 VFD picking up AWS          **
+// ** credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,          **
+// ** AWS_SESSION_TOKEN) and region (AWS_REGION or                    **
+// ** HDF5_ROS3_AWS_REGION) from ENVIRONMENT VARIABLES.               **
+// ** It does NOT directly read ~/.aws/credentials or handle profiles.**
+// ** To use credentials from a profile (e.g., 'saml-pub'), ensure    **
+// ** these environment variables are set correctly *before* running  **
+// ** the GDAL command                                                **
+// *********************************************************************
+// ******************************************************************
+// ** CRITICAL WARNING: AWS_SESSION_TOKEN IS *NOT* SUPPORTED       **
+// ** by the H5FD_ros3_fapl_t struct in HDF5 <= 1.14.2             **
+// ** If a session token is required (e.g., for SAML/IAM temp      **
+// ** credentials), this configuration method WILL FAIL silently   **
+// ** or with signature errors later.                              **
+// ******************************************************************
 GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 {
     // Extract Filename and Subdataset Path
@@ -1610,14 +2041,12 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     }
     else
     {
-        // If the prefix is not used, the full string is the filename.
-        // This might happen if GDAL identifies the file by other means
-        // and calls this driver's Open function directly.
-        //pszDataIdentifier = pszFullInput;
+        // No "NISAR:" prefix. This means Identify() was successful.
+        // The entire string is the data identifier (filename + optional subdataset).
+        pszDataIdentifier = pszFullInput;
         CPLDebug("NISAR_DRIVER",
-                 "No 'NISAR:' prefix found. Using full filename: %s",
+                 "No 'NISAR:' prefix found (Identify() succeeded). Using full string: %s",
                  pszDataIdentifier);
-        return nullptr;
     }
 
     // Handle empty filename after prefix removal
@@ -1628,7 +2057,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
                  pszFullInput);
         return nullptr;
     }
-    /////////////
+
     // Now, parse pszDataIdentifier to separate filename and HDF5 path.
     const char *pszLastColon = strrchr(pszDataIdentifier, ':');
 
@@ -1666,7 +2095,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         CPLDebug("NISAR_DRIVER", "No colon separator found. Filename: %s",
                  pszActualFilename);
     }
-    ///////////
+
     // Final check on extracted filename
     if (pszActualFilename == nullptr || pszActualFilename[0] == '\0')
     {
@@ -1710,14 +2139,6 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     const char *s3_path_part = nullptr;
     bool bNeedToCloseFapl1 = false;
 
-    // Prepare for H5Fopen: Handle Local vs S3 & Configure FAPL
-    //hid_t hHDF5 = -1;                      // Handle for the opened HDF5 file
-    //hid_t fapl_id = H5P_DEFAULT;           // File Access Property List, default for local
-    //const char* filenameForH5Fopen = pszActualFilename; // Use parsed name by default
-    //std::string final_url_storage;
-    //bool bIsS3 = false;                    // Flag to track if we configured for S3
-    //const char* s3_path_part = nullptr; // Will point to "bucket/key..." or "s3://bucket/key..."
-
     // Check for GDAL S3 path OR direct S3 URL
     if (STARTS_WITH_CI(pszActualFilename, "/vsis3/"))
     {
@@ -1748,9 +2169,6 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     {
         CPLDebug("NISAR_DRIVER",
                  "Assuming local file path, using default HDF5 FAPL.");
-        // Keep bIsS3 = false;
-        // Keep fapl_id = H5P_DEFAULT;
-        // Keep filenameForH5Fopen = pszActualFilename;
     }
 
     // Configure FAPL for ROS3 if an S3 path was detected
@@ -1763,7 +2181,6 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         {
             // Error handling
             CPLFree(pszActualFilename);
-            bNeedToCloseFapl1 = true;
             return nullptr;
         }
 
@@ -1778,7 +2195,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         const char *env_region = getenv("AWS_REGION");
         // In H5FDros3.h, the struct members are declared like: char aws_region[H5FD_ROS3_MAX_REGION_LEN + 1];
         // So, strncpy should use the full MAX_LEN. The struct already has space for null terminator.
-        if (env_region != nullptr || strlen(env_region) > 0)
+ 	if (env_region != nullptr && strlen(env_region) > 0)
         {
             strncpy(ros3_fapl_conf.aws_region, env_region,
                     H5FD_ROS3_MAX_REGION_LEN);
@@ -2200,359 +2617,402 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         CPLDebug("NISAR_DRIVER", "Using default FAPL for Pass 2 (local file).");
     }
 
-    //  Pass 2: Re-Open HDF5 File with Optimized FAPL
-    hid_t hHDF5 = -1;  // This will be the final handle stored in poDS
-    CPLDebug("NISAR_DRIVER",
-             "Attempting H5Fopen (Pass 2 - Optimized) with filename: %s",
+    // Pass 2: Open HDF5 file
+    hid_t hHDF5 = -1;
+    CPLDebug("NISAR_DRIVER", "Attempting H5Fopen (Pass 2) with optimized FAPL: %s",
              filenameForH5Fopen);
+ 
+    // Suppress errors for this open attempt
+    H5E_auto2_t old_func_pass2;
+    void *old_client_data_pass2;
+    H5Eget_auto2(H5E_DEFAULT, &old_func_pass2, &old_client_data_pass2);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
     hHDF5 = H5Fopen(filenameForH5Fopen, H5F_ACC_RDONLY, fapl_id_pass2);
+    H5Eset_auto2(H5E_DEFAULT, old_func_pass2, old_client_data_pass2); // Restore
+ 
+    // Close FAPL for Pass 2, it's not needed after open
     if (bNeedToCloseFapl2)
     {
         H5Pclose(fapl_id_pass2);
-    }  // Close optimized FAPL
-
-    // Check H5Fopen result for Pass 2
+        bNeedToCloseFapl2 = false;
+    }
+ 
     if (hHDF5 < 0)
     {
         CPLError(CE_Failure, CPLE_OpenFailed,
-                 "H5Fopen failed (Pass 2) for '%s'.", filenameForH5Fopen);
-        H5Eprint(H5E_DEFAULT, stderr);  // Print details on final open failure
+              "H5Fopen failed (Pass 2) for '%s'.", filenameForH5Fopen);
         CPLFree(pszActualFilename);
         return nullptr;
     }
-    CPLDebug("NISAR_DRIVER",
-             "Successfully RE-opened HDF5 file handle with optimized FAPL: %s",
-             filenameForH5Fopen);
-
-    // PRODUCT LEVEL DETECTION (GENERALIZED)
-    bool isLevel1 = false;
-    bool isLevel2 = false;
-    std::string productType = "";
-    std::string productLevelGroup = "";
-
-    // First, try to read the productType dataset for an explicit definition.
-    hid_t hIdentGroup =
-        H5Gopen2(hHDF5, "/science/LSAR/identification", H5P_DEFAULT);
-    if (hIdentGroup >= 0)
+ 
+    CPLDebug("NISAR_DRIVER", "H5Fopen (Pass 2) successful.");
+ 
+    // Create the NisarDataset object
+    NisarDataset *poDS = nullptr;
+    try
     {
-        CPLDebug("NISAR_DRIVER",
-                 "Successfully opened /science/LSAR/identification group.");
-        hid_t hDset = H5Dopen2(hIdentGroup, "productType", H5P_DEFAULT);
-        if (hDset >= 0)
-        {
-            hid_t hStrType = H5Dget_type(hDset);
-            if (hStrType >= 0)
-            {
-                // This logic correctly handles both fixed and variable-length strings
-                if (H5Tis_variable_str(hStrType) > 0)
-                {
-                    char *pszVal = nullptr;
-                    if (H5Dread(hDset, hStrType, H5S_ALL, H5S_ALL, H5P_DEFAULT,
-                                &pszVal) >= 0 &&
-                        pszVal)
-                    {
-                        productType = pszVal;
-                        H5free_memory(pszVal);
-                    }
-                }
-                else
-                {
-                    size_t nSize = H5Tget_size(hStrType);
-                    if (nSize > 0)
-                    {
-                        char *pszVal = (char *)CPLMalloc(nSize + 1);
-                        if (H5Dread(hDset, hStrType, H5S_ALL, H5S_ALL,
-                                    H5P_DEFAULT, pszVal) >= 0)
-                        {
-                            pszVal[nSize] = '\0';
-                            productType = pszVal;
-                        }
-                        CPLFree(pszVal);
-                    }
-                }
-                H5Tclose(hStrType);
-            }
-            H5Dclose(hDset);
-        }
-        H5Gclose(hIdentGroup);
+        poDS = new NisarDataset();
     }
-
-    // Now, use the result of our search to set the flags and the product group name.
-    if (!productType.empty())
+    catch (const std::bad_alloc &)
     {
-        CPLDebug("NISAR_DRIVER", "Read productType: %s", productType.c_str());
-        if (productType == "RSLC" || productType == "RIFG" ||
-            productType == "RUNW")
-        {
-            isLevel1 = true;
-            productLevelGroup =
-                productType;  // Use the actual product type for path building
-        }
-        else if (productType == "GSLC" || productType == "GUNW" ||
-                 productType == "GOFF" || productType == "GCOV")
-        {
-            isLevel2 = true;
-            productLevelGroup =
-                productType;  // Use the actual product type for path building
-        }
-    }
-    // If we couldn't read productType, fall back to checking for common group paths.
-    else
-    {
-        CPLDebug("NISAR_DRIVER", "Could not determine productType. Falling "
-                                 "back to path-based detection.");
-
-        // Temporarily disable HDF5 error printing for these checks
-        H5E_auto2_t old_func;
-        void *old_client_data;
-        H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
-        H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
-
-        if (H5Lexists(hHDF5, "/science/LSAR/RSLC", H5P_DEFAULT) > 0)
-        {
-            isLevel1 = true;
-            productLevelGroup = "RSLC";
-        }
-        else if (H5Lexists(hHDF5, "/science/LSAR/GSLC", H5P_DEFAULT) > 0)
-        {
-            isLevel2 = true;
-            productLevelGroup = "GSLC";
-        }
-        else if (H5Lexists(hHDF5, "/science/LSAR/GCOV", H5P_DEFAULT) > 0)
-        {
-            isLevel2 = true;
-            productLevelGroup = "GCOV";
-        }
-        // NOTE: Add other checks for RIFG, GUNW, etc.
-
-        H5Eset_auto2(H5E_DEFAULT, old_func,
-                     old_client_data);  // Restore error handler
-    }
-
-    // *********************************************************************
-    // ** IMPORTANT AWS AUTHENTICATION FOR ROS3 VFD:                      **
-    // ** This driver relies on the HDF5 ROS3 VFD picking up AWS          **
-    // ** credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,          **
-    // ** AWS_SESSION_TOKEN) and region (AWS_REGION or                    **
-    // ** HDF5_ROS3_AWS_REGION) from ENVIRONMENT VARIABLES.               **
-    // ** It does NOT directly read ~/.aws/credentials or handle profiles.**
-    // ** To use credentials from a profile (e.g., 'saml-pub'), ensure    **
-    // ** these environment variables are set correctly *before* running  **
-    // ** the GDAL command                                                **
-    // *********************************************************************
-    // ******************************************************************
-    // ** CRITICAL WARNING: AWS_SESSION_TOKEN IS *NOT* SUPPORTED       **
-    // ** by the H5FD_ros3_fapl_t struct in HDF5 <= 1.14.2             **
-    // ** If a session token is required (e.g., for SAML/IAM temp      **
-    // ** credentials), this configuration method WILL FAIL silently   **
-    // ** or with signature errors later.                              **
-    // ******************************************************************
-
-    // Open the HDF5 File
-    // Temporarily suppress HDF5 error stack printing to avoid noise if file is not HDF5
-    //H5E_auto2_t old_func;
-    //void *old_client_data;
-    //H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
-    //H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
-
-    // Identification Check (Post-Open)
-    htri_t groupExists = H5Lexists(hHDF5, "/science/LSAR", H5P_DEFAULT);
-    if (groupExists <= 0)
-    {
-        CPLDebug("NISAR_DRIVER",
-                 "File '%s' lacks expected '/science/LSAR' group. Not treating "
-                 "as NISAR.",
-                 filenameForH5Fopen);
+        CPLError(CE_Failure, CPLE_OutOfMemory,
+              "Failed to allocate NisarDataset object.");
         H5Fclose(hHDF5);
         CPLFree(pszActualFilename);
         return nullptr;
     }
-    CPLDebug("NISAR_DRIVER", "Found '/science/LSAR' group, proceeding.");
+ 
+    // Assign handles and critical info to the dataset object
+    // The NisarDataset destructor must handle closing/freeing these
+    poDS->hHDF5 = hHDF5;
+    poDS->pszFilename = pszActualFilename;
+    pszActualFilename = nullptr; // Ownership transferred to poDS
+ 
+    // Read identification metadata to populate m_sProductType, m_bIsLevel1, etc.
+    // This MUST be done before the "Priority 2" logic below.
+    poDS->ReadIdentificationMetadata();
+ 
+     // Declare variables needed for dataset path logic
+     const char *pathToOpen = nullptr;
+     std::string sConstructedPath;
 
-    // Store the raw open options in the dataset's metadata
-    // This makes them visible in gdalinfo under "Open_Options" domain
-    //poDS->SetMetadata( papszOptions, "OPEN_OPTIONS" );
+     // Determine which dataset to open.
+     // Priority 1: A specific HDF5 path (NISAR:file.h5:/path/to/data)
+     if (pszSubdatasetPath != nullptr)
+     {
+         pathToOpen = pszSubdatasetPath;
+         CPLDebug("NISAR_DRIVER",
+                  "Priority 1: Opening specified HDF5 dataset path: %s",
+                  pathToOpen);
+     }
+     else
+     {
+         // Priority 2: Open Options (-oo INST=... -oo FREQ=... -oo POL=...)
+         const char *pszInst = CSLFetchNameValue(poOpenInfo->papszOpenOptions, "INST");
+         const char *pszFreq = CSLFetchNameValue(poOpenInfo->papszOpenOptions, "FREQ");
+         const char *pszPol = CSLFetchNameValue(poOpenInfo->papszOpenOptions, "POL");
 
-    hid_t hDataset = -1;
-    const char *pathToOpen = nullptr;
-    NisarDataset *poDS = nullptr;
-
-    if (pszSubdatasetPath == nullptr)
-    {
-        // CASE 1: No specific subdataset requested - Perform Discovery
-        CPLDebug("NISAR_DRIVER", "No specific HDF5 dataset path provided. "
-                                 "Running subdataset discovery.");
-
-        // Create preliminary dataset object to hold results and file handle
-        try
+        if (pszInst || pszFreq || pszPol)
         {
-            poDS = new NisarDataset();
-        }
-        catch (...)
-        {
-            H5Fclose(hHDF5);
-            CPLFree(pszActualFilename);
-            return nullptr;
-        }
-        poDS->hHDF5 = hHDF5;                    // Keep file handle
-        poDS->pszFilename = pszActualFilename;  // Takes ownership
-        poDS->hDataset = -1;  // No specific dataset opened yet
+            // Use defaults for any missing options
+            if (pszInst == nullptr) pszInst = "LSAR";
+            if (pszFreq == nullptr) pszFreq = "A";
+            
+            // We default POL *after* checking GCOV vs. non-GCOV
+            // if (pszPol == nullptr) ... 
 
-        // Prepare visitor data
-        NISARVisitorData visitor_data;
-        std::vector<std::string> found_paths_vector;
-        visitor_data.pFoundPaths = &found_paths_vector;
-        visitor_data.hStartingGroupID = poDS->hHDF5;
+            CPLDebug("NISAR_DRIVER", "Priority 2: Using OpenOptions: INST=%s, FREQ=%s, POL=%s",
+                     pszInst, pszFreq, pszPol ? pszPol : "(default)");
 
-        CPLDebug("NISAR_DRIVER", "Starting H5Ovisit to find subdatasets.");
-        herr_t visit_status =
-            H5Ovisit(poDS->hHDF5,  // Starting object ID (root group/file)
-                     H5_INDEX_NAME, H5_ITER_NATIVE,  // Index and order
-                     NISAR_FindDatasetsVisitor,      // callback function
-                     (void *)&visitor_data,          // User data
-                     H5O_INFO_BASIC);  // Fields for oinfo struct in callback
-        if (visit_status < 0)
-        {
-            CPLError(CE_Warning, CPLE_AppDefined,
-                     "HDF5 visit failed during subdataset search.");
+            // Validate Open Options
+            if (!EQUAL(pszInst, "LSAR") && !EQUAL(pszInst, "SSAR"))
+            {
+                CPLError(CE_Failure, CPLE_OpenFailed,
+                         "Invalid INST open option: '%s'. Must be LSAR or SSAR.", pszInst);
+                delete poDS;
+                return nullptr;
+            }
+            if (!EQUAL(pszFreq, "A") && !EQUAL(pszFreq, "B"))
+            {
+                CPLError(CE_Failure, CPLE_OpenFailed,
+                         "Invalid FREQ open option: '%s'. Must be A or B.", pszFreq);
+                delete poDS;
+                return nullptr;
+            }
+
+            // Check if product type was identified (MUST do this before POL validation)
+            if (poDS->m_sProductType.empty())
+            {
+                CPLError(CE_Failure, CPLE_OpenFailed,
+                         "Could not determine NISAR product type (e.g., GSLC, RSLC) from metadata. "
+                         "Cannot construct path from Open Options.");
+                delete poDS;
+                return nullptr;
+            }
+
+            // BEGIN METADATA-BASED POL VALIDATION
+            // Create uppercase versions of INST & FREQ for path building
+            std::string sInstUpper = pszInst;
+            std::string sFreqUpper = pszFreq;
+            for(auto& c : sInstUpper) c = toupper(c);
+            for(auto& c : sFreqUpper) c = toupper(c);
+
+            // Build the base path to the metadata group
+            std::string sMetadataGroupPath = "/science/";
+            sMetadataGroupPath += sInstUpper;
+            sMetadataGroupPath += "/";
+            sMetadataGroupPath += poDS->m_sProductType; // "GCOV", "RSLC", etc.
+
+            if (poDS->m_bIsLevel1)
+            {
+                sMetadataGroupPath += "/swaths/frequency";
+            }
+            else if (poDS->m_bIsLevel2)
+            {
+                sMetadataGroupPath += "/grids/frequency";
+            }
+            else
+            {
+                CPLError(CE_Failure, CPLE_OpenFailed,
+                         "Unknown product level for '%s'. Cannot determine if path is 'swaths' or 'grids'.",
+                         poDS->m_sProductType.c_str());
+                delete poDS;
+                return nullptr;
+            }
+            
+            sMetadataGroupPath += sFreqUpper; // e.g., .../frequencyA
+
+            // Determine which metadata list to read
+            std::string sMetadataDatasetName;
+            const bool bIsGCOV = EQUAL(poDS->m_sProductType.c_str(), "GCOV");
+
+            // This ensures we have a modifiable string for uppercasing.
+            std::string sPol;
+            
+            if (bIsGCOV)
+            {
+                sMetadataDatasetName = "listOfCovarianceTerms";
+                if (pszPol == nullptr) pszPol = "HHHH"; // Default GCOV to HHHH
+            }
+            else
+            {
+                sMetadataDatasetName = "listOfPolarizations";
+                if (pszPol == nullptr) pszPol = "HH"; // Default others to HH
+            }
+
+            // Create a modifiable, uppercased string for the path
+            std::string sPolUpper = pszPol;
+            for(auto& c : sPolUpper) c = toupper(c);
+
+            //  Read the metadata dataset
+            std::string sPolList;
+            hid_t hMetadataGroup = -1;
+            
+            // Suppress HDF5 errors during this read attempt
+            H5E_auto2_t old_func_md; void *old_client_data_md;
+            H5Eget_auto2(H5E_DEFAULT, &old_func_md, &old_client_data_md);
+            H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+            hMetadataGroup = H5Gopen2(poDS->hHDF5, sMetadataGroupPath.c_str(), H5P_DEFAULT);
+            if (hMetadataGroup >= 0)
+            {
+                // Use the helper we defined earlier to read the scalar string
+                sPolList = poDS->ReadHDF5StringDataset(hMetadataGroup, sMetadataDatasetName.c_str());
+                if (sPolList.empty())
+                {
+                    // If scalar fails, try to read as 1D ARRAY (for RSLC, GSLC)
+                    CPLDebug("NISAR_DRIVER", 
+                             "Failed to read %s as scalar string, trying as 1D array...",
+                              sMetadataDatasetName.c_str());
+                    sPolList = poDS->ReadHDF5StringArrayAsList(hMetadataGroup, sMetadataDatasetName.c_str());
+                }
+                H5Gclose(hMetadataGroup);
+            }
+            
+            // Restore HDF5 error handling
+            H5Eset_auto2(H5E_DEFAULT, old_func_md, old_client_data_md);
+
+            if (sPolList.empty())
+            {
+                CPLError(CE_Failure, CPLE_OpenFailed,
+                         "Failed to read polarization list '%s' from '%s'.",
+                         sMetadataDatasetName.c_str(), sMetadataGroupPath.c_str());
+                delete poDS; return nullptr;
+            }
+
+            // Split and check the list
+            // Assumes list is comma-separated: "HHHH, HVHV, VHVH, VVVV"
+            char **papszPolList = CSLTokenizeString2(sPolList.c_str(), ",", CSLT_STRIPLEADSPACES | CSLT_STRIPENDSPACES);
+            bool bPolFound = false;
+            for (int i = 0; papszPolList && papszPolList[i] != nullptr; ++i)
+            {
+                if (EQUAL(papszPolList[i], pszPol))
+                {
+                    bPolFound = true;
+                    break;
+                }
+            }
+
+            if (!bPolFound)
+            {
+                CPLError(CE_Failure, CPLE_OpenFailed,
+                         "Invalid POL open option: '%s' is not in the list of "
+                         "available polarizations for this product. "
+                         "Available polarizations are: [%s]",
+                         pszPol, sPolList.c_str());
+                //CPLDebug("NISAR_DRIVER", "Available polarizations are: [%s]", sPolList.c_str());
+                CSLDestroy(papszPolList);
+                delete poDS; return nullptr;
+            }
+            
+            CSLDestroy(papszPolList);
+            //  END METADATA-BASED POL VALIDATION
+
+            // Store options in dataset
+            poDS->m_sInst = pszInst;
+            poDS->m_sFreq = pszFreq;
+            poDS->m_sPol = pszPol;
+
+            // Uppercase POL for GCOV/RSLC paths
+            for(auto& c : sPol) c = toupper(c);
+
+            //Construct the path
+            // We already built the base path, just add the final component
+            sConstructedPath = sMetadataGroupPath;
+            sConstructedPath += "/";
+            sConstructedPath += sPolUpper; // Add the now-validated polarization
+
+            pathToOpen = sConstructedPath.c_str();
+            CPLDebug("NISAR_DRIVER", "Constructed HDF5 dataset path from OpenOptions: %s", pathToOpen);
         }
         else
         {
-            CPLDebug("NISAR_DRIVER",
-                     "H5Ovisit completed. Found %d potential subdatasets.",
-                     (int)found_paths_vector.size());
-        }
+            // Priority 3: No specific subdataset requested - Perform Discovery
+            CPLDebug("NISAR_DRIVER", "Priority 3: No specific HDF5 dataset path or OpenOptions. "
+                                    "Running subdataset discovery.");
 
-        // Check if the visitor found any relevant datasets
-        if (!found_paths_vector.empty())
-        {
-            char **papszMetadataList = nullptr;
-            int nSubdatasets = 0;
+             poDS->hDataset = -1; // No specific dataset opened yet
 
-            for (const std::string &hdf5_path : found_paths_vector)
-            {
-                nSubdatasets++;
-                // Construct SUBDATASET_n_NAME
-                std::string name_key =
-                    CPLSPrintf("SUBDATASET_%d_NAME", nSubdatasets);
-                std::string name_val = pszPrefix;
-                name_val += "\"";
-                name_val += poDS->pszFilename;
-                name_val += "\":";
-                name_val += hdf5_path;
-                papszMetadataList = CSLSetNameValue(
-                    papszMetadataList, name_key.c_str(), name_val.c_str());
+             // Prepare visitor data
+             NISARVisitorData visitor_data;
+             std::vector<std::string> found_paths_vector;
+             visitor_data.pFoundPaths = &found_paths_vector;
+             visitor_data.hStartingGroupID = poDS->hHDF5;
 
-                // Construct SUBDATASET_n_DESC
-                std::string desc_key =
-                    CPLSPrintf("SUBDATASET_%d_DESC", nSubdatasets);
-                std::string desc_val = "[";
-                hid_t hSubDataset =
-                    H5Dopen2(poDS->hHDF5, hdf5_path.c_str(), H5P_DEFAULT);
-                if (hSubDataset >= 0)
-                {
-                    hid_t hSubSpace = H5Dget_space(hSubDataset);
-                    hid_t hSubType = H5Dget_type(hSubDataset);
-                    int nSubDim = (hSubSpace >= 0)
-                                      ? H5Sget_simple_extent_ndims(hSubSpace)
-                                      : -1;
-                    if (nSubDim > 0)
+             CPLDebug("NISAR_DRIVER", "Starting H5Ovisit to find subdatasets.");
+             herr_t visit_status =
+
+             H5Ovisit(poDS->hHDF5,  // Starting object ID (root group/file)
+                       H5_INDEX_NAME, H5_ITER_NATIVE,  // Index and order
+                       NISAR_FindDatasetsVisitor,     // callback function
+                       (void *)&visitor_data,         // User data
+                       H5O_INFO_BASIC);  // Fields for oinfo struct in callback
+             if (visit_status < 0)
+             {
+                 CPLError(CE_Warning, CPLE_AppDefined,
+                          "HDF5 visit failed during subdataset search.");
+             }
+             else
+             {
+                 CPLDebug("NISAR_DRIVER",
+                          "H5Ovisit completed. Found %d potential subdatasets.",
+                           (int)found_paths_vector.size());
+             }
+
+             // Check if the visitor found any relevant datasets
+             if (!found_paths_vector.empty())
+             {
+                 char **papszMetadataList = nullptr;
+                 int nSubdatasets = 0;
+
+                 for (const std::string &hdf5_path : found_paths_vector)
+                 {
+                     nSubdatasets++;
+                     // Construct SUBDATASET_n_NAME
+                     std::string name_key =
+                         CPLSPrintf("SUBDATASET_%d_NAME", nSubdatasets);
+                     std::string name_val = pszPrefix;
+                     name_val += "\"";
+                     name_val += poDS->pszFilename;
+                     name_val += "\":";
+                     name_val += hdf5_path;
+                     papszMetadataList = CSLSetNameValue(
+                         papszMetadataList, name_key.c_str(), name_val.c_str());
+
+                     // Construct SUBDATASET_n_DESC
+                     std::string desc_key =
+                         CPLSPrintf("SUBDATASET_%d_DESC", nSubdatasets);
+                     std::string desc_val = "[";
+                     hid_t hSubDataset =
+                     H5Dopen2(poDS->hHDF5, hdf5_path.c_str(), H5P_DEFAULT);
+                    if (hSubDataset >= 0)
                     {
-                        hsize_t adimsSub[H5S_MAX_RANK];
-                        H5Sget_simple_extent_dims(hSubSpace, adimsSub, nullptr);
-                        // Format dimensions (Example: YxX for 2D)
-                        for (int i = 0; i < nSubDim; ++i)
-                        {
-                            desc_val += CPLSPrintf(
-                                "%llu%s", (unsigned long long)adimsSub[i],
-                                (i < nSubDim - 1) ? "x" : "");
-                        }
-                    }
-                    else if (nSubDim == 0)
-                    {
-                        desc_val += "scalar";
+                         hid_t hSubSpace = H5Dget_space(hSubDataset);
+                         hid_t hSubType = H5Dget_type(hSubDataset);
+                         int nSubDim = (hSubSpace >= 0)
+                         ? H5Sget_simple_extent_ndims(hSubSpace) : -1;
+                         if (nSubDim > 0)
+                         {
+                            hsize_t adimsSub[H5S_MAX_RANK];
+                             H5Sget_simple_extent_dims(hSubSpace, adimsSub, nullptr);
+                             // Format dimensions (Example: YxX for 2D)
+                             for (int i = 0; i < nSubDim; ++i)
+                             {
+                                 desc_val += CPLSPrintf(
+                                     "%llu%s", (unsigned long long)adimsSub[i],
+                                 (i < nSubDim - 1) ? "x" : "");
+                             }
+                         }
+                         else if (nSubDim == 0)
+                         {
+
+                            desc_val += "scalar";
+                         }
+                         else
+                         {
+                             desc_val += "?";
+                         }
+                         desc_val += "]";
+                         GDALDataType eSubDataType =
+                            (hSubType >= 0)
+                                 ? NisarDataset::GetGDALDataType(hSubType)
+                                 : GDT_Unknown;
+                         std::string sDataTypeDesc = "(unknown)";
+                         if (eSubDataType != GDT_Unknown)
+                         {
+                             sDataTypeDesc = "(";
+                             if (GDALDataTypeIsComplex(eSubDataType))
+                                 sDataTypeDesc += "complex, ";
+                             sDataTypeDesc += GDALGetDataTypeName(
+                                                GDALGetNonComplexDataType(eSubDataType));
+                             sDataTypeDesc += ")";
+                         }
+                         desc_val += " " + hdf5_path + " " + sDataTypeDesc;
+                         if (hSubType >= 0)
+                             H5Tclose(hSubType);
+                         if (hSubSpace >= 0)
+                             H5Sclose(hSubSpace);
+                             H5Dclose(hSubDataset);
                     }
                     else
                     {
-                        desc_val += "?";
+                        desc_val += "?] " + hdf5_path + " (Error opening)";
                     }
-                    desc_val += "]";
-                    GDALDataType eSubDataType =
-                        (hSubType >= 0)
-                            ? NisarDataset::GetGDALDataType(hSubType)
-                            : GDT_Unknown;
-                    std::string sDataTypeDesc = "(unknown)";
-                    if (eSubDataType != GDT_Unknown)
-                    {
-                        sDataTypeDesc = "(";
-                        if (GDALDataTypeIsComplex(eSubDataType))
-                            sDataTypeDesc += "complex, ";
-                        sDataTypeDesc += GDALGetDataTypeName(
-                            GDALGetNonComplexDataType(eSubDataType));
-                        sDataTypeDesc += ")";
-                    }
-                    desc_val += " " + hdf5_path + " " + sDataTypeDesc;
-                    if (hSubType >= 0)
-                        H5Tclose(hSubType);
-                    if (hSubSpace >= 0)
-                        H5Sclose(hSubSpace);
-                    H5Dclose(hSubDataset);
-                }
-                else
-                {
-                    desc_val += "?] " + hdf5_path + " (Error opening)";
-                }
                 papszMetadataList = CSLSetNameValue(
-                    papszMetadataList, desc_key.c_str(), desc_val.c_str());
-            }  // End loop
+                papszMetadataList, desc_key.c_str(), desc_val.c_str());
+                }  // End loop
 
-            // Store the generated list in papszSubDatasets member
-            CSLDestroy(
-                poDS->papszSubDatasets);  // Clear any previous just in case
-            poDS->papszSubDatasets = papszMetadataList;  // Assign the new list
-            // Also set it in the metadata domain for immediate visibility
-            poDS->SetMetadata(poDS->papszSubDatasets, "SUBDATASETS");
+                 // Store the generated list in papszSubDatasets member
+                 CSLDestroy(
+                     poDS->papszSubDatasets);  // Clear any previous just in case
+                     poDS->papszSubDatasets = papszMetadataList;  // Assign the new list
+                     // Also set it in the metadata domain for immediate visibility
+                     poDS->SetMetadata(poDS->papszSubDatasets, "SUBDATASETS");
+                     // Configure poDS as a container dataset
+                     poDS->nRasterXSize = 0;
+                     poDS->nRasterYSize = 0;
+                     poDS->nBands = 0;
+                     CPLDebug("NISAR_DRIVER",
+                          "Populated SUBDATASETS metadata for %d datasets.",
+                          nSubdatasets);
 
-            // Configure poDS as a container dataset
-            poDS->nRasterXSize = 0;
-            poDS->nRasterYSize = 0;
-            poDS->nBands = 0;
-            CPLDebug("NISAR_DRIVER",
-                     "Populated SUBDATASETS metadata for %d datasets.",
-                     nSubdatasets);
-
-            // Return the container dataset
-            poDS->TryLoadXML();
-            poDS->SetDescription(poOpenInfo->pszFilename);
-            return poDS;  // <<<< EXIT POINT 1: Return container dataset
-        }  // Exit Point 1: Returned container dataset
-
-    }  // End handling of pszSubdatasetPath == nullptr !!!!ozp
-
-    if (pszSubdatasetPath != nullptr)
-    {
-        pathToOpen = pszSubdatasetPath;
-        CPLDebug("NISAR_DRIVER",
-                 "Attempting to open specified HDF5 dataset path: %s",
-                 pathToOpen);
-    }
-    else
-    {
-        //Subdataset Discovery goes here TODO: Implement
-        pathToOpen = DEFAULT_NISAR_HDF5_PATH;
-        CPLDebug("NISAR_DRIVER", "No specific HDF5 dataset path: %s",
-                 pathToOpen);
-    }
-    if (!pathToOpen || !*pathToOpen)
-    {
-        //Error handling
-        H5Fclose(hHDF5);
-        CPLFree(pszActualFilename);
-        return nullptr;
-    }
+                 // Return the container dataset
+                 poDS->TryLoadXML();
+                 poDS->SetDescription(poOpenInfo->pszFilename);
+                 return poDS;  // <<<< EXIT POINT 1: Return container dataset
+            }
+            else
+            {
+                // No subdatasets found
+                CPLDebug("NISAR_DRIVER", "No subdatasets found during discovery.");
+                 delete poDS;
+                 return nullptr;
+             }
+        } // End Priority 3
+    } // End Priority 2
 
     // Prepare DAPL with Chunk Cache
-    hDataset = -1;
+    poDS->hDataset = -1;
     hid_t dapl_id = H5P_DEFAULT;  // Default DAPL initially
     bool bNeedToCloseDapl = false;
 
@@ -2596,52 +3056,51 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         dapl_id = H5P_DEFAULT;
     }
 
+    // Suppress HDF5 errors for this existence check
+    H5E_auto2_t old_func_exists;
+    void *old_client_data_exists;
+    H5Eget_auto2(H5E_DEFAULT, &old_func_exists, &old_client_data_exists);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+    // Check if the link to the dataset exists
+    htri_t bExists = H5Lexists(poDS->hHDF5, pathToOpen, H5P_DEFAULT);
+
+    // Restore HDF5 error handling
+    H5Eset_auto2(H5E_DEFAULT, old_func_exists, old_client_data_exists);
+
+    if (bExists <= 0)
+    {
+        // Path does not exist. Fail gracefully with a clear error.
+        CPLError(CE_Failure, CPLE_OpenFailed,
+                 "The HDF5 dataset '%s' does not exist in the file '%s'. "
+                 "Please check the path or Open Options.",
+                 pathToOpen, poDS->pszFilename);
+    
+        // Clean up the DAPL if we created it
+        if (bNeedToCloseDapl)
+            H5Pclose(dapl_id);
+
+        delete poDS; // This closes hHDF5 and frees pszFilename
+        return nullptr;
+    }
     // Open Target HDF5 Dataset
     CPLDebug("NISAR_DRIVER", "Attempting to open HDF5 dataset: %s", pathToOpen);
-    hDataset = H5Dopen2(hHDF5, pathToOpen, dapl_id);  //Use configured dapl_id
+    poDS->hDataset = H5Dopen2(poDS->hHDF5, pathToOpen, dapl_id); //Use configured dapl_id
     if (bNeedToCloseDapl)
         H5Pclose(dapl_id);
 
-    if (hDataset < 0)
+    if (poDS->hDataset < 0)
     {
         CPLError(CE_Failure, CPLE_OpenFailed,
-                 "H5Dopen2 failed for dataset '%s'.", pathToOpen);
-        H5Fclose(hHDF5);
-        CPLFree(pszActualFilename);  // Free buffer if ownership not transferred
+	 	            "H5Dopen2 failed for dataset '%s'.", pathToOpen);
+        delete poDS; // Destructor handles hHDF5 and pszActualFilename
         return nullptr;
     }
 
     CPLDebug("NISAR_DRIVER", "Successfully Opened Subdataset: %s", pathToOpen);
 
-    // Create a new NisarDataset object
-    poDS = nullptr;
-
-    try
-    {
-        poDS = new NisarDataset();
-    }
-    catch (const std::bad_alloc &)
-    {
-        CPLError(CE_Failure, CPLE_OutOfMemory,
-                 "Failed to allocate NisarDataset.");
-        H5Dclose(hDataset);
-        H5Fclose(hHDF5);
-        CPLFree(pszActualFilename);
-        return nullptr;
-    }
-
-    // Store handles and filename (transfer ownership of pszActualFilename)
-    poDS->hHDF5 = hHDF5;
-    poDS->hDataset = hDataset;
-    // Assuming pszFilename member exists in NisarDataset class
-    poDS->pszFilename = pszActualFilename;  // Destructor MUST CPLFree this
-
-    // Get dataset information (dimensions, datatype, etc.)
-    // using HDF5 API calls and set the corresponding
-    // properties in poDS (nRasterXSize, nRasterYSize, etc.).
-
     // Get HDF5 native data type
-    hid_t hH5DataType = H5Dget_type(hDataset);
+    hid_t hH5DataType = H5Dget_type(poDS->hDataset);
     if (hH5DataType < 0)
     {  // Check if H5Dget_type itself failed
         CPLError(CE_Failure, CPLE_AppDefined,
@@ -2678,7 +3137,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
              GDALGetDataTypeName(poDS->eDataType));
 
     // Get dimensions
-    hid_t hDataspace = H5Dget_space(hDataset);
+    hid_t hDataspace = H5Dget_space(poDS->hDataset);
     if (hDataspace < 0)
     {  // Check return value
         CPLError(CE_Failure, CPLE_AppDefined,
@@ -2725,30 +3184,30 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     CPLDebug("NISAR_DRIVER", "Dataset Dimensions: %d x %d", poDS->nRasterXSize,
              poDS->nRasterYSize);
 
-    if (isLevel2)
+    if (poDS->m_bIsLevel2)
     {
         CPLDebug("NISAR_DRIVER", "Level 2 product detected. Georeferencing "
-                                 "will use GeoTransform and SRS.");
+ 	                             "will use GeoTransform and SRS.");
     }
-    else if (isLevel1)
+    else if (poDS->m_bIsLevel1)
     {
         CPLDebug(
-            "NISAR_DRIVER",
-            "Level 1 product detected. Will generate GCPs for georeferencing.");
-        // Pass the discovered product group to the function
-        if (poDS->GenerateGCPsFromGeolocationGrid(productLevelGroup.c_str()) !=
-            CE_None)
-        {
-            CPLError(CE_Warning, CPLE_AppDefined,
-                     "Failed to generate GCPs for Level 1 product.");
-            // Decide if this should be a fatal error or just a warning
-        }
+	    "NISAR_DRIVER",
+ 	    "Level 1 product detected. Will generate GCPs for georeferencing.");
+ 	    // Pass the discovered product group to the function
+ 	    if (poDS->GenerateGCPsFromGeolocationGrid(poDS->m_sProductType.c_str()) !=
+ 	        CE_None)
+ 	    {
+ 	        CPLError(CE_Warning, CPLE_AppDefined,
+ 	                 "Failed to generate GCPs for Level 1 product.");
+ 	        // Decide if this should be a fatal error or just a warning
+ 	    }
     }
     else
     {
-        CPLError(
-            CE_Warning, CPLE_AppDefined,
-            "Unknown NISAR product structure. Georeferencing may be absent.");
+ 	    CPLError(
+ 	        CE_Warning, CPLE_AppDefined,
+ 	        "Unknown NISAR product structure. Georeferencing may be absent.");
     }
 
     // Determine Band Count
@@ -2803,45 +3262,35 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     // and not for the container (which has hDataset < 0).
     if (poDS->hDataset >= 0)
     {
-        // Get the full original dataset name as passed to Open()
-        const char *pszFullDatasetName = poOpenInfo->pszFilename;
+        // Construct a connection string that points EXACTLY to this subdataset
+        // Format: NISAR:filename.h5:hdf5_path
+        // This ensures the Derived driver re-opens the specific band, not the generic container.
+        std::string sTargetString = "NISAR:";
+        sTargetString += poDS->pszFilename; 
+        sTargetString += ":";
+        sTargetString += pathToOpen; // pathToOpen is the HDF5 internal path defined earlier
 
         bool bIsComplex = GDALDataTypeIsComplex(poDS->eDataType);
         // Check if it's a numeric type (not string or unknown)
-        bool bIsNumeric =
-            (poDS->eDataType > GDT_Unknown && poDS->eDataType < GDT_CInt16);
+        bool bIsNumeric = (poDS->eDataType > GDT_Unknown && poDS->eDataType < GDT_CInt16);
 
         if (bIsComplex)
         {
-            CPLDebug("NISAR_DRIVER",
-                     "Advertising complex DERIVED_SUBDATASETS for %s",
-                     pszFullDatasetName);
-            poDS->SetMetadataItem(
-                "AMPLITUDE",
-                CPLSPrintf("DERIVED_SUBDATASET:AMPLITUDE:\"%s\"",
-                           pszFullDatasetName),
-                "DERIVED_SUBDATASETS");
-            poDS->SetMetadataItem("PHASE",
-                                  CPLSPrintf("DERIVED_SUBDATASET:PHASE:\"%s\"",
-                                             pszFullDatasetName),
-                                  "DERIVED_SUBDATASETS");
-            poDS->SetMetadataItem("REAL",
-                                  CPLSPrintf("DERIVED_SUBDATASET:REAL:\"%s\"",
-                                             pszFullDatasetName),
-                                  "DERIVED_SUBDATASETS");
-            poDS->SetMetadataItem("IMAG",
-                                  CPLSPrintf("DERIVED_SUBDATASET:IMAG:\"%s\"",
-                                             pszFullDatasetName),
-                                  "DERIVED_SUBDATASETS");
-            poDS->SetMetadataItem("CONJ",
-                                  CPLSPrintf("DERIVED_SUBDATASET:CONJ:\"%s\"",
-                                             pszFullDatasetName),
-                                  "DERIVED_SUBDATASETS");
-            poDS->SetMetadataItem(
-                "INTENSITY",
-                CPLSPrintf("DERIVED_SUBDATASET:INTENSITY:\"%s\"",
-                           pszFullDatasetName),
-                "DERIVED_SUBDATASETS");
+            CPLDebug("NISAR_DRIVER", "Advertising complex DERIVED_SUBDATASETS for %s", sTargetString.c_str());
+            
+            // Note: We use sTargetString.c_str() here, NOT pszFullDatasetName
+            poDS->SetMetadataItem("AMPLITUDE", 
+                CPLSPrintf("DERIVED_SUBDATASET:AMPLITUDE:\"%s\"", sTargetString.c_str()), "DERIVED_SUBDATASETS");
+            poDS->SetMetadataItem("PHASE", 
+                CPLSPrintf("DERIVED_SUBDATASET:PHASE:\"%s\"", sTargetString.c_str()), "DERIVED_SUBDATASETS");
+            poDS->SetMetadataItem("REAL", 
+                CPLSPrintf("DERIVED_SUBDATASET:REAL:\"%s\"", sTargetString.c_str()), "DERIVED_SUBDATASETS");
+            poDS->SetMetadataItem("IMAG", 
+                CPLSPrintf("DERIVED_SUBDATASET:IMAG:\"%s\"", sTargetString.c_str()), "DERIVED_SUBDATASETS");
+            poDS->SetMetadataItem("INTENSITY", 
+                CPLSPrintf("DERIVED_SUBDATASET:INTENSITY:\"%s\"", sTargetString.c_str()), "DERIVED_SUBDATASETS");
+            poDS->SetMetadataItem("CONJ", 
+                CPLSPrintf("DERIVED_SUBDATASET:CONJ:\"%s\"", sTargetString.c_str()), "DERIVED_SUBDATASETS");
         }
 
         // LOGAMPLITUDE is available for both complex and non-complex numeric types
@@ -2849,12 +3298,12 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         {
             CPLDebug("NISAR_DRIVER",
                      "Advertising LOGAMPLITUDE DERIVED_SUBDATASET for %s",
-                     pszFullDatasetName);
+                     sTargetString.c_str());
             poDS->SetMetadataItem(
                 "LOGAMPLITUDE",
-                CPLSPrintf("DERIVED_SUBDATASET:LOGAMPLITUDE:\"%s\"",
-                           pszFullDatasetName),
-                "DERIVED_SUBDATASETS");
+                CPLSPrintf("DERIVED_SUBDATASET:LOGAMPLITUDE:\"%s\"", 
+                            sTargetString.c_str()), 
+                           "DERIVED_SUBDATASETS");
         }
     }
     // End DERIVED_SUBDATASETS
@@ -2952,16 +3401,16 @@ CPLErr NisarDataset::GetGeoTransform(GDALGeoTransform &oGT) const
              "coordinate/spacing datasets.",
              pszGeoTransformAttrName);
 
-    start_pos = datasetPath.find("/science/LSAR/");
-    if (start_pos != std::string::npos)
+    // Use the member variables set during Open()
+    // This only applies to Level 2 products
+    if (m_bIsLevel2 && !m_sInst.empty() && !m_sProductType.empty())
     {
-        size_t end_pos =
-            datasetPath.find('/', start_pos + strlen("/science/LSAR/"));
-        if (end_pos != std::string::npos)
-        {
-            productRootPath = datasetPath.substr(0, end_pos);
-        }
+        productRootPath = "/science/" + m_sInst + "/" + m_sProductType;
     }
+    // Note: We don't need to check m_bIsLevel1 because L1 products
+    // use GCPs, and we already checked for GCPs above.
+    // This block is the fallback for L2 products only.
+
     if (productRootPath.empty())
     {
         CPLError(CE_Warning, CPLE_AppDefined,
@@ -3614,7 +4063,6 @@ cleanup:
 CPLErr
 NisarDataset::GenerateGCPsFromGeolocationGrid(const char *pszProductGroup)
 {
-
     // DECLARE ALL VARIABLES AT THE TOP
     CPLErr eErr = CE_Failure;
     hid_t hGridGroup = -1;
@@ -3648,21 +4096,22 @@ NisarDataset::GenerateGCPsFromGeolocationGrid(const char *pszProductGroup)
 
     bool bStartTimeAllocatedByHDF5 = false;
 
-    // Declare all path strings here, before any potential 'goto' calls
-    const char *pszStartTimePath =
-        "/science/LSAR/identification/zeroDopplerStartTime";
-    std::string sGridPath = CPLSPrintf(
-        "/science/LSAR/%s/metadata/geolocationGrid", pszProductGroup);
-    std::string sStartingRangePath = CPLSPrintf(
-        "/science/LSAR/%s/swaths/frequencyA/startingRange", pszProductGroup);
-    std::string sSlantRangeSpacingPath =
-        CPLSPrintf("/science/LSAR/%s/swaths/frequencyA/slantRangeSpacing",
-                   pszProductGroup);
+    // Declare all path strings here, using member variables
+    // m_sInst ("LSAR" or "SSAR") was set in NisarDataset::Open()
+    std::string sStartTimePath =
+        "/science/" + m_sInst + "/identification/zeroDopplerStartTime";
+
+    std::string sGridPath = "/science/" + m_sInst + "/" + pszProductGroup +
+                            "/metadata/geolocationGrid";
+
+    std::string sSwathPath =
+        "/science/" + m_sInst + "/" + pszProductGroup + "/swaths/frequencyA/";
+
+    std::string sStartingRangePath = sSwathPath + "startingRange";
+    std::string sSlantRangeSpacingPath = sSwathPath + "slantRangeSpacing";
     std::string sPulseRepetitionFrequencyPath =
-        CPLSPrintf("/science/LSAR/%s/swaths/frequencyA/nominalAcquisitionPRF",
-                   pszProductGroup);
-    std::string sSlantRangePath = CPLSPrintf(
-        "/science/LSAR/%s/swaths/frequencyA/slantRange", pszProductGroup);
+        sSwathPath + "nominalAcquisitionPRF";
+    std::string sSlantRangePath = sSwathPath + "slantRange";
 
     // Open the geolocationGrid group
     hGridGroup = H5Gopen2(hHDF5, sGridPath.c_str(), H5P_DEFAULT);
@@ -3827,7 +4276,7 @@ NisarDataset::GenerateGCPsFromGeolocationGrid(const char *pszProductGroup)
     //hScalarDset = -1;
 
     // Read and parse the Scene Start Time STRING
-    hScalarDset = H5Dopen2(hHDF5, pszStartTimePath, H5P_DEFAULT);
+    hScalarDset = H5Dopen2(hHDF5, sStartTimePath.c_str(), H5P_DEFAULT);
     if (hScalarDset >= 0)
     {
         hStrType = H5Dget_type(hScalarDset);

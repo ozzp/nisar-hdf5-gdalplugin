@@ -23,7 +23,8 @@ requirements:
 
   run:
     # Key dependencies to run with
-    - libgdal-core
+    # same version that was used in the 'host' section.
+    - {{ pin_compatible('libgdal-core', exact=True) }}
     - hdf5
 
 test:
