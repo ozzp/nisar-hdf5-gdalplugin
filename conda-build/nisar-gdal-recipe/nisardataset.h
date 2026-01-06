@@ -15,6 +15,7 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <mutex>
 #include <cstring>  // For memcpy
 #include "cpl_string.h"
