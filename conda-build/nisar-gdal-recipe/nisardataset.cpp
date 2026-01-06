@@ -17,6 +17,7 @@
 #include <iomanip>  // For std::setprecision
 #include <vector>
 #include <string>
+#include <algorithm>
 
 #include "cpl_port.h"
 #include "cpl_conv.h"
