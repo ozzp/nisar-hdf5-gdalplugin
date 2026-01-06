@@ -1990,6 +1990,158 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
     return GDALPamDataset::GetMetadata(pszDomain);
 }
 
+// ====================================================================
+// METADATA IMPLEMENTATION
+// ====================================================================
+
+// Structure to pass state into the H5Ovisit callback
+struct NISAR_MetadataVisitData
+{
+    NisarDataset* poDS;
+    char** papszMetadata; // CSL list being built
+    std::string sPrefix;  // Optional prefix if needed
+};
+
+// Callback for H5Ovisit to recursively read metadata
+herr_t NisarDataset::MetadataVisitCallback(hid_t hGroup, const char *name, const H5O_info2_t *info, void *op_data)
+{
+    NISAR_MetadataVisitData* data = static_cast<NISAR_MetadataVisitData*>(op_data);
+    
+    // Skip the root object of the visit itself (".")
+    if (EQUAL(name, ".")) return 0;
+
+    // Only process Datasets (skip Groups during the visit, we only want values)
+    if (info->type != H5O_TYPE_DATASET) {
+        return 0; 
+    }
+
+    // Open the Object
+    hid_t hDset = H5Dopen2(hGroup, name, H5P_DEFAULT);
+    if (hDset < 0) return 0;
+
+    // Check Dimensions (Filter out Arrays)
+    hid_t hSpace = H5Dget_space(hDset);
+    int nRank = H5Sget_simple_extent_ndims(hSpace);
+    
+    // Check Type
+    hid_t hType = H5Dget_type(hDset);
+    H5T_class_t type_class = H5Tget_class(hType);
+    
+    bool bShouldRead = false;
+
+    // Allow Scalar Numerics (Rank 0)
+    if (nRank == 0) {
+        bShouldRead = true; 
+    }
+    // Allow Strings (Scalar or 1D-Scalar like)
+    else if (type_class == H5T_STRING && nRank <= 1) {
+        if (nRank == 1) {
+            hsize_t dims[1];
+            H5Sget_simple_extent_dims(hSpace, dims, nullptr);
+            if (dims[0] == 1) bShouldRead = true;
+        } else {
+             bShouldRead = true; // Scalar string
+        }
+    }
+
+    if (bShouldRead)
+    {
+        std::string sValue;
+
+        // Read the Value (CORRECTED LOGIC)
+        // If it is a 1D string array (dim=1), use the Array helper to handle it safely
+        if (type_class == H5T_STRING && nRank == 1) {
+            sValue = data->poDS->ReadHDF5StringArrayAsList(hGroup, name);
+        }
+        // Otherwise use the Scalar helper (handles both numeric and string scalars)
+        else {
+             sValue = data->poDS->ReadHDF5StringDataset(hGroup, name);
+        }
+        
+        // If string read failed (maybe it's a simple numeric scalar not caught by helper), read as double
+        if (sValue.empty() && type_class != H5T_STRING) {
+            double dfVal;
+            if (H5Dread(hDset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dfVal) >= 0) {
+                sValue = CPLSPrintf("%.15g", dfVal);
+            }
+        }
+
+        if (!sValue.empty())
+        {
+            // Format the Key
+            // Flatten path: "algorithms/geocoding" -> "algorithms_geocoding"
+            std::string sKey = name;
+            std::replace(sKey.begin(), sKey.end(), '/', '_');
+
+            // Add to list
+            data->papszMetadata = CSLSetNameValue(data->papszMetadata, sKey.c_str(), sValue.c_str());
+        }
+    }
+
+    // Cleanup
+    if (hType >= 0) H5Tclose(hType);
+    if (hSpace >= 0) H5Sclose(hSpace);
+    if (hDset >= 0) H5Dclose(hDset);
+
+    return 0; // Continue visiting
+}
+
+void NisarDataset::InitializeMetadataMap()
+{
+    // Only map if product type is known
+    if (!m_sInst.empty() && !m_sProductType.empty()) {
+        m_oMetadataMap["ORBIT"]        = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/orbit", "NISAR_ORBIT" };
+        m_oMetadataMap["ATTITUDE"]     = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/attitude", "NISAR_ATTITUDE" };
+        m_oMetadataMap["CALIBRATION"]  = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/calibrationInformation", "NISAR_CALIBRATION" };
+        m_oMetadataMap["PROCESSING"]   = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/processingInformation", "NISAR_PROCESSING" };
+        m_oMetadataMap["SOURCE"]       = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/sourceData", "NISAR_SOURCE" };
+        m_oMetadataMap["RADAR_GRID"]   = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/radarGrid", "NISAR_RADAR_GRID" };
+    }
+}
+
+void NisarDataset::LoadMetadataDomain(const std::string& sKeyword)
+{
+    auto it = m_oMetadataMap.find(sKeyword);
+    if (it == m_oMetadataMap.end()) {
+        CPLDebug("NISAR_DRIVER", "Requested metadata keyword '%s' not recognized.", sKeyword.c_str());
+        return;
+    }
+
+    const std::string& sH5Path = it->second.sHDF5Path;
+    const std::string& sDomain = it->second.sGDALDomain;
+
+    // Suppress errors temporarily in case the group doesn't exist
+    H5E_auto2_t old_func; void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+    hid_t hGroup = H5Gopen2(hHDF5, sH5Path.c_str(), H5P_DEFAULT);
+    
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore
+
+    if (hGroup < 0) {
+        CPLDebug("NISAR_DRIVER", "Metadata group not found: %s", sH5Path.c_str());
+        return;
+    }
+
+    CPLDebug("NISAR_DRIVER", "Loading metadata domain: %s from %s", sDomain.c_str(), sH5Path.c_str());
+
+    NISAR_MetadataVisitData visitData;
+    visitData.poDS = this;
+    visitData.papszMetadata = nullptr;
+
+    // Recursively visit all objects in this group
+    H5Ovisit(hGroup, H5_INDEX_NAME, H5_ITER_NATIVE, MetadataVisitCallback, &visitData, H5O_INFO_BASIC);
+
+    // Apply the gathered list to the dataset
+    if (visitData.papszMetadata) {
+        SetMetadata(visitData.papszMetadata, sDomain.c_str());
+        CSLDestroy(visitData.papszMetadata);
+    }
+
+    H5Gclose(hGroup);
+}
+
 /************************************************************************/
 /*                                Open()                                */
 /* This static method is responsible for opening a NISAR HDF5 file and  */
@@ -3315,6 +3467,38 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
              pathToOpen);
 
     // Initialize any other metadata, etc.
+    // Load Requested Metadata
+    if (!poDS->m_sInst.empty() && !poDS->m_sProductType.empty()) 
+    {
+        poDS->InitializeMetadataMap();
+
+        const char* pszMetaOption = poOpenInfo->papszOpenOptions 
+                                    ? CSLFetchNameValue(poOpenInfo->papszOpenOptions, "METADATA") 
+                                    : nullptr;
+
+        if (pszMetaOption)
+        {
+            if (EQUAL(pszMetaOption, "ALL"))
+            {
+                // Load everything in the map
+                for (auto const& [key, val] : poDS->m_oMetadataMap) {
+                    poDS->LoadMetadataDomain(key);
+                }
+            }
+            else
+            {
+                // Split comma-separated list
+                char **papszTokens = CSLTokenizeString2(pszMetaOption, ",", CSLT_STRIPLEADSPACES | CSLT_STRIPENDSPACES);
+                for (int i = 0; papszTokens && papszTokens[i] != nullptr; i++) {
+                    std::string sToken = papszTokens[i];
+                    // Manual uppercase loop
+                    for (auto & c: sToken) c = toupper(c);
+                    poDS->LoadMetadataDomain(sToken);
+                }
+                CSLDestroy(papszTokens);
+            }
+        }
+    }
 
     return poDS;
 }

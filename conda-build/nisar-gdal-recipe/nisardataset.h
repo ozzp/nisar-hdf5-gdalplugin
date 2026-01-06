@@ -77,6 +77,18 @@ class NisarDataset : public GDALPamDataset
     std::string m_sPol;  // HH, HV, etc.
 
   private:  // Keep static helpers private if only used internally
+    struct MetadataCategory {
+        std::string sHDF5Path;      
+        std::string sGDALDomain;    
+    };
+    std::map<std::string, MetadataCategory> m_oMetadataMap;
+
+    void InitializeMetadataMap();
+    void LoadMetadataDomain(const std::string& sKeyword);
+
+    // Static callback for H5Ovisit
+    static herr_t MetadataVisitCallback(hid_t hObject, const char *name, const H5O_info2_t *info, void *op_data);
+
     void ReadIdentificationMetadata();
     std::string ReadHDF5StringArrayAsList(hid_t hParentGroup, const char *pszDatasetName);
     std::string ReadHDF5StringDataset(hid_t hParentGroup, const char *pszDatasetName);
