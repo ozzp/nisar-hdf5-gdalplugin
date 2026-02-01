@@ -2099,12 +2099,13 @@ void NisarDataset::InitializeMetadataMap()
 {
     // Only map if product type is known
     if (!m_sInst.empty() && !m_sProductType.empty()) {
-        m_oMetadataMap["ORBIT"]        = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/orbit", "NISAR_ORBIT" };
         m_oMetadataMap["ATTITUDE"]     = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/attitude", "NISAR_ATTITUDE" };
-        m_oMetadataMap["CALIBRATION"]  = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/calibrationInformation", "NISAR_CALIBRATION" };
-        m_oMetadataMap["PROCESSING"]   = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/processingInformation", "NISAR_PROCESSING" };
-        m_oMetadataMap["SOURCE"]       = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/sourceData", "NISAR_SOURCE" };
-        m_oMetadataMap["RADAR_GRID"]   = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/radarGrid", "NISAR_RADAR_GRID" };
+        m_oMetadataMap["CALIBRATIONINFORMATION"]  = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/calibrationInformation", "NISAR_CALIBRATIONINFORMATION" };
+        m_oMetadataMap["CEOSANALYSISREADYDATA"]     = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/ceosAnalysisReadyData", "NISAR_CEOSANALYSISREADYDATA" };
+        m_oMetadataMap["ORBIT"]        = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/orbit", "NISAR_ORBIT" };
+        m_oMetadataMap["PROCESSINGINFORMATION"]   = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/processingInformation", "NISAR_PROCESSINGINFORMATION" };
+        m_oMetadataMap["RADARGRID"]   = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/radarGrid", "NISAR_RADARGRID" };
+        m_oMetadataMap["SOURCEDATA"]       = { "/science/" + m_sInst + "/" + m_sProductType + "/metadata/sourceData", "NISAR_SOURCEDATA" };
     }
 }
 
