@@ -453,12 +453,10 @@ static std::string ReadStringAttribute(hid_t hLocation, const char *pszAttrName)
 }
 
 // Helper to read a string attribute from an HDF5 object
-static std::string ReadH5StringAttribute(hid_t hObjectID,
-                                         const char *pszAttrName)
+static std::string ReadH5StringAttribute(hid_t hObjectID, const char *pszAttrName)
 {
     // Suppress errors for this check
-    H5E_auto2_t old_func;
-    void *old_client_data;
+    H5E_auto2_t old_func; void *old_client_data;
     H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
     H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
 
@@ -467,20 +465,28 @@ static std::string ReadH5StringAttribute(hid_t hObjectID,
         H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
         return "";
     }
-    hid_t hAttr = H5Aopen_name(hObjectID, pszAttrName);
-    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
-    if (hAttr < 0)
-        return "";
+    
+    // Use H5Aopen (modern API)
+    hid_t hAttr = H5Aopen(hObjectID, pszAttrName, H5P_DEFAULT);
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore errors
+    
+    if (hAttr < 0) return "";
 
     std::string strVal;
     hid_t hAttrType = H5Aget_type(hAttr);
     hid_t hAttrSpace = H5Aget_space(hAttr);
+    
+    // Create a native memory type for reading strings
+    // This ensures HDF5 handles the conversion from NULLPAD (File) to NULLTERM (Memory)
+    hid_t hMemType = H5Tcopy(H5T_C_S1);
+
     if (H5Sget_simple_extent_npoints(hAttrSpace) == 1)
     {
         if (H5Tis_variable_str(hAttrType) > 0)
         {
+            H5Tset_size(hMemType, H5T_VARIABLE);
             char *pszVal = nullptr;
-            if (H5Aread(hAttr, hAttrType, &pszVal) >= 0 && pszVal)
+            if (H5Aread(hAttr, hMemType, &pszVal) >= 0 && pszVal)
             {
                 strVal = pszVal;
                 H5free_memory(pszVal);
@@ -491,10 +497,16 @@ static std::string ReadH5StringAttribute(hid_t hObjectID,
             size_t nSize = H5Tget_size(hAttrType);
             if (nSize > 0)
             {
+                // Set memory size to nSize + 1 to accommodate the null terminator
+                H5Tset_size(hMemType, nSize + 1);
+                H5Tset_strpad(hMemType, H5T_STR_NULLTERM);
+
                 char *pszVal = (char *)CPLMalloc(nSize + 1);
-                if (H5Aread(hAttr, hAttrType, pszVal) >= 0)
+                
+                // Read using hMemType (Memory), not hAttrType (File)
+                if (H5Aread(hAttr, hMemType, pszVal) >= 0)
                 {
-                    pszVal[nSize] = '\0';
+                    pszVal[nSize] = '\0'; // Safety null termination
                     strVal = pszVal;
                 }
                 CPLFree(pszVal);
@@ -502,6 +514,7 @@ static std::string ReadH5StringAttribute(hid_t hObjectID,
         }
     }
 
+    H5Tclose(hMemType);
     H5Sclose(hAttrSpace);
     H5Tclose(hAttrType);
     H5Aclose(hAttr);
@@ -1240,7 +1253,6 @@ static std::string Read1DArraySummary(hid_t hGroup, const char *pszDsetName,
     if (hNativeDtype < 0)
         goto cleanup;  // Add check in case native type fails
     type_class = H5Tget_class(hNativeDtype);
-    // ---
 
     if (H5Sget_simple_extent_ndims(hSpace) != 1)
     {
@@ -1470,7 +1482,7 @@ static std::string Read1DArraySummary(hid_t hGroup, const char *pszDsetName,
                 }
             }
         }
-        else  // --- Handle other types ---
+        else  // Handle other types
         {
             sResult = "(unsupported data type)";
         }
@@ -2020,13 +2032,12 @@ herr_t NisarDataset::MetadataVisitCallback(hid_t hGroup, const char *name, const
     if (EQUAL(name, ".")) return 0;
     if (info->type != H5O_TYPE_DATASET) return 0; 
 
-    // 1. Identify Key Name early to skip expensive reads
+    // Identify Key Name early to skip expensive reads
     std::string sKey = name;
     // Normalize path separators to underscores for the key
     std::replace(sKey.begin(), sKey.end(), '/', '_');
 
-    // --- FILTER: Skip massive configuration dumps ---
-    // These datasets contain huge multi-line YAML strings that break gdalinfo output
+    // FILTER: Skip massive configuration dumps
     if (sKey.find("runConfigurationContents") != std::string::npos) {
         return 0; // Skip entirely
     }
@@ -2075,15 +2086,21 @@ herr_t NisarDataset::MetadataVisitCallback(hid_t hGroup, const char *name, const
 
         if (!sValue.empty())
         {
-            // --- SANITIZE: Remove Newlines ---
-            // If any other metadata contains newlines, replace them to preserve Key=Value format
+            // SANITIZE: Remove Newlines
             if (sValue.find('\n') != std::string::npos || sValue.find('\r') != std::string::npos) {
-                // Determine if we should truncate or escape. 
-                // For now, if it's huge, we probably should have filtered it above.
-                // For smaller strings, just replace newlines with spaces.
                 std::replace(sValue.begin(), sValue.end(), '\n', ' ');
                 std::replace(sValue.begin(), sValue.end(), '\r', ' ');
             }
+
+            // START UNIT READING BLOCK
+            std::string sUnits = ReadH5StringAttribute(hDset, "units");
+            if (!sUnits.empty() && 
+                !EQUAL(sUnits.c_str(), "unitless") && 
+                !EQUAL(sUnits.c_str(), "1"))
+            {
+                sKey += " (" + sUnits + ")";
+            }
+            // END UNIT READING BLOCK
 
             data->papszMetadata = CSLSetNameValue(data->papszMetadata, sKey.c_str(), sValue.c_str());
         }
@@ -2095,6 +2112,7 @@ herr_t NisarDataset::MetadataVisitCallback(hid_t hGroup, const char *name, const
 
     return 0; 
 }
+
 void NisarDataset::InitializeMetadataMap()
 {
     // Only map if product type is known
