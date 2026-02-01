@@ -2,6 +2,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(gdal-driver-nisar CXX)
 
+# GDAL (3.9+) requires C++17. 
+# Without this, including gdal_priv.h will fail.
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 # Find the necessary dependencies.
 find_package(GDAL REQUIRED)
 find_package(HDF5 REQUIRED)

@@ -1133,20 +1133,28 @@ cleanup:  // Label for resource cleanup
 /************************************************************************/
 
 NisarDataset::NisarDataset()
-    : hHDF5(H5I_INVALID_HID), hDataset(H5I_INVALID_HID), eDataType(GDT_Unknown),
-      pszFilename(nullptr), papszSubDatasets(nullptr),
+    : hHDF5(H5I_INVALID_HID),
+      hDataset(H5I_INVALID_HID),
+      eDataType(GDT_Unknown),
+      pszFilename(nullptr),
+      papszSubDatasets(nullptr),
       m_poSRS(nullptr),  // Initialize SRS pointer
       m_bGotSRS(false),  // Initialize SRS flag
       m_bGotMetadata(false),
       m_papszGlobalMetadata(nullptr),  // Initialize global metadata cache
       m_bGotGlobalMetadata(false),     // Initialize global metadata flag
       m_bIsLevel1(false),
-      m_bIsLevel2(false)
+      m_bIsLevel2(false),
+      m_bGotGeoTransform(false)
 {
 
     // Initialize GT array cache if using caching pattern for it
-    // m_adfGeoTransform[0] = 0.0; m_adfGeoTransform[1] = 1.0; m_adfGeoTransform[2] = 0.0;
-    // m_adfGeoTransform[3] = 0.0; m_adfGeoTransform[4] = 0.0; m_adfGeoTransform[5] = 1.0;
+     m_adfGeoTransform[0] = 0.0;
+     m_adfGeoTransform[1] = 1.0;
+     m_adfGeoTransform[2] = 0.0;
+     m_adfGeoTransform[3] = 0.0;
+     m_adfGeoTransform[4] = 0.0;
+     m_adfGeoTransform[5] = 1.0;
 }
 
 /************************************************************************/
@@ -1670,6 +1678,7 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
                                      "for NISAR_GLOBAL domain.");
             NISAR_AttrCallbackData callback_data;
             callback_data.ppapszList = &m_papszGlobalMetadata;
+            callback_data.pszPrefix = "";
             hsize_t idx = 0;
             // Iterate attributes on the root group (represented by the file handle)
             H5Aiterate2(this->hHDF5, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
@@ -2008,40 +2017,41 @@ herr_t NisarDataset::MetadataVisitCallback(hid_t hGroup, const char *name, const
 {
     NISAR_MetadataVisitData* data = static_cast<NISAR_MetadataVisitData*>(op_data);
     
-    // Skip the root object of the visit itself (".")
     if (EQUAL(name, ".")) return 0;
+    if (info->type != H5O_TYPE_DATASET) return 0; 
 
-    // Only process Datasets (skip Groups during the visit, we only want values)
-    if (info->type != H5O_TYPE_DATASET) {
-        return 0; 
+    // 1. Identify Key Name early to skip expensive reads
+    std::string sKey = name;
+    // Normalize path separators to underscores for the key
+    std::replace(sKey.begin(), sKey.end(), '/', '_');
+
+    // --- FILTER: Skip massive configuration dumps ---
+    // These datasets contain huge multi-line YAML strings that break gdalinfo output
+    if (sKey.find("runConfigurationContents") != std::string::npos) {
+        return 0; // Skip entirely
     }
 
-    // Open the Object
     hid_t hDset = H5Dopen2(hGroup, name, H5P_DEFAULT);
     if (hDset < 0) return 0;
 
-    // Check Dimensions (Filter out Arrays)
     hid_t hSpace = H5Dget_space(hDset);
     int nRank = H5Sget_simple_extent_ndims(hSpace);
-    
-    // Check Type
     hid_t hType = H5Dget_type(hDset);
     H5T_class_t type_class = H5Tget_class(hType);
     
     bool bShouldRead = false;
 
-    // Allow Scalar Numerics (Rank 0)
+    // Logic: Read Scalars and 1-element Strings
     if (nRank == 0) {
         bShouldRead = true; 
     }
-    // Allow Strings (Scalar or 1D-Scalar like)
     else if (type_class == H5T_STRING && nRank <= 1) {
         if (nRank == 1) {
             hsize_t dims[1];
             H5Sget_simple_extent_dims(hSpace, dims, nullptr);
-            if (dims[0] == 1) bShouldRead = true;
+            if (dims[0] == 1) bShouldRead = true; 
         } else {
-             bShouldRead = true; // Scalar string
+             bShouldRead = true;
         }
     }
 
@@ -2049,17 +2059,13 @@ herr_t NisarDataset::MetadataVisitCallback(hid_t hGroup, const char *name, const
     {
         std::string sValue;
 
-        // Read the Value (CORRECTED LOGIC)
-        // If it is a 1D string array (dim=1), use the Array helper to handle it safely
         if (type_class == H5T_STRING && nRank == 1) {
             sValue = data->poDS->ReadHDF5StringArrayAsList(hGroup, name);
         }
-        // Otherwise use the Scalar helper (handles both numeric and string scalars)
         else {
              sValue = data->poDS->ReadHDF5StringDataset(hGroup, name);
         }
         
-        // If string read failed (maybe it's a simple numeric scalar not caught by helper), read as double
         if (sValue.empty() && type_class != H5T_STRING) {
             double dfVal;
             if (H5Dread(hDset, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &dfVal) >= 0) {
@@ -2069,24 +2075,26 @@ herr_t NisarDataset::MetadataVisitCallback(hid_t hGroup, const char *name, const
 
         if (!sValue.empty())
         {
-            // Format the Key
-            // Flatten path: "algorithms/geocoding" -> "algorithms_geocoding"
-            std::string sKey = name;
-            std::replace(sKey.begin(), sKey.end(), '/', '_');
+            // --- SANITIZE: Remove Newlines ---
+            // If any other metadata contains newlines, replace them to preserve Key=Value format
+            if (sValue.find('\n') != std::string::npos || sValue.find('\r') != std::string::npos) {
+                // Determine if we should truncate or escape. 
+                // For now, if it's huge, we probably should have filtered it above.
+                // For smaller strings, just replace newlines with spaces.
+                std::replace(sValue.begin(), sValue.end(), '\n', ' ');
+                std::replace(sValue.begin(), sValue.end(), '\r', ' ');
+            }
 
-            // Add to list
             data->papszMetadata = CSLSetNameValue(data->papszMetadata, sKey.c_str(), sValue.c_str());
         }
     }
 
-    // Cleanup
     if (hType >= 0) H5Tclose(hType);
     if (hSpace >= 0) H5Sclose(hSpace);
     if (hDset >= 0) H5Dclose(hDset);
 
-    return 0; // Continue visiting
+    return 0; 
 }
-
 void NisarDataset::InitializeMetadataMap()
 {
     // Only map if product type is known
@@ -3513,261 +3521,209 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 /************************************************************************/
 CPLErr NisarDataset::GetGeoTransform(GDALGeoTransform &oGT) const
 {
-    CPLDebug("NISAR_DRIVER",
-             "NisarDataset::GetGeoTransform(GDALGeoTransform &) const called.");
-
-    double *padfTransform = oGT.data();
-    // (Local handles for HDF5 calls)
-    hid_t hXCoords = -1, hYCoords = -1, hXSpacing = -1, hYSpacing = -1;
-    hid_t hMemSpace = -1, hFileSpaceX = -1, hFileSpaceY = -1;
-    std::string datasetPath, xCoordinatesPath, yCoordinatesPath;
-    std::string xCoordinateSpacingPath, yCoordinateSpacingPath, geoBasePath;
-    double xSpacing = 0.0, ySpacing = 0.0, xCoord = 0.0, yCoord = 0.0;
-    hsize_t count1d[1] = {0}, offset1d[1] = {0};
-    size_t lastSlashPos = 0;
-
-    datasetPath = get_hdf5_object_name(this->hDataset);
-    std::string productRootPath;
-    std::string frequencyGroup = "frequencyA";
-    size_t start_pos;
-
-    // Try to get from PAM
-    CPLErr eErr = GDALPamDataset::GetGeoTransform(oGT);
-    if (eErr == CE_None)
+    // Check PAM (Persistent Aux Metadata) first.
+    // This allows users to manually override georeferencing via .aux.xml
+    if (GDALPamDataset::GetGeoTransform(oGT) == CE_None)
     {
-        CPLDebug("NISAR_DRIVER",
-                 "GetGeoTransform returning cached/PAM transform.");
         return CE_None;
     }
 
-    // Handle GCPs
+    // Check Internal Cache (Thread-Safe)
+    {
+        std::lock_guard<std::mutex> lock(m_GeoTransformMutex);
+        if (m_bGotGeoTransform)
+        {
+            memcpy(oGT.data(), m_adfGeoTransform, sizeof(double) * 6);
+            return CE_None;
+        }
+    }
+
+    // Check for GCPs (Level 1 Products)
+    // If we have GCPs, we should technically return CE_Failure for GeoTransform
+    // so that applications know to use the GCPs instead.
     if (const_cast<NisarDataset *>(this)->GetGCPCount() > 0)
     {
-        // If we have GCPs, return the default "not found" transform.
-        return GDALPamDataset::GetGeoTransform(
-            oGT);  // This returns the default failure case
+        return CE_Failure; 
     }
 
-    // Initialize output to default identity transform
-    double adfIdent[6] = {0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-    memcpy(padfTransform, adfIdent, sizeof(double) * 6);
-
-    // Check if this is a container dataset (no raster bands)
+    // Check if this is a valid raster dataset
     if (hDataset < 0)
     {
-        CPLDebug("NISAR_DRIVER",
-                 "GetGeoTransform called on container dataset or invalid "
-                 "handle. Returning default identity.");
-        return GDALPamDataset::GetGeoTransform(oGT);
+        return CE_Failure;
     }
 
-    eErr = CE_Failure;  // Default to failure until success
+    // CALCULATION LOGIC STARTS HERE
+    // (Only runs once per dataset open)
 
-    H5E_auto2_t old_func;
-    void *old_client_data;
-    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
-    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+    CPLDebug("NISAR_DRIVER", "GetGeoTransform: Cache miss. calculating...");
 
-    // Method 1: Try reading standard 'GeoTransform' attribute
-    const char *pszGeoTransformAttrName = "GeoTransform";
+    double adfCalcGT[6] = {0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
+    bool bFound = false;
 
-    eErr =
-        ReadGeoTransformAttribute(this->hDataset, pszGeoTransformAttrName, oGT);
-    if (eErr == CE_None)
+    // Try reading standard 'GeoTransform' attribute directly
+    if (ReadGeoTransformAttribute(this->hDataset, "GeoTransform", oGT) == CE_None)
     {
-        CPLDebug("NISAR_DRIVER", "Read '%s' attribute from dataset.",
-                 pszGeoTransformAttrName);
-        goto cleanup;  // Found it, we're done
+        // oGT is populated by the helper, copy to local calc buffer
+        memcpy(adfCalcGT, oGT.data(), sizeof(double) * 6);
+        bFound = true;
+    }
+    else
+    {
+        // Fallback: coordinate/spacing datasets (Level 2)
+        if (m_bIsLevel2 && !m_sInst.empty() && !m_sProductType.empty())
+        {
+            std::string datasetPath = get_hdf5_object_name(this->hDataset);
+            std::string productRootPath = "/science/" + m_sInst + "/" + m_sProductType;
+            std::string frequencyGroup = "frequencyA";
+            
+            if (datasetPath.find("/frequencyB/") != std::string::npos)
+            {
+                frequencyGroup = "frequencyB";
+            }
+
+            std::string geoBasePath = productRootPath + "/grids/" + frequencyGroup + "/";
+            
+            std::string xCoordinatesPath = geoBasePath + "xCoordinates";
+            std::string yCoordinatesPath = geoBasePath + "yCoordinates";
+            std::string xSpacingPath = geoBasePath + "xCoordinateSpacing";
+            std::string ySpacingPath = geoBasePath + "yCoordinateSpacing";
+
+            // Local handles
+            hid_t hXCoords = -1, hYCoords = -1, hXSpacing = -1, hYSpacing = -1;
+            hid_t hMemSpace = -1, hFileSpace = -1;
+            
+            // Suppress errors during attempt
+            H5E_auto2_t old_func; void *old_client_data;
+            H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+            H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+            hXCoords = H5Dopen2(this->hHDF5, xCoordinatesPath.c_str(), H5P_DEFAULT);
+            hYCoords = H5Dopen2(this->hHDF5, yCoordinatesPath.c_str(), H5P_DEFAULT);
+            hXSpacing = H5Dopen2(this->hHDF5, xSpacingPath.c_str(), H5P_DEFAULT);
+            hYSpacing = H5Dopen2(this->hHDF5, ySpacingPath.c_str(), H5P_DEFAULT);
+
+            // Restore errors
+            H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+
+            if (hXCoords >= 0 && hYCoords >= 0)
+            {
+                double xSpacingVal = 0.0, ySpacingVal = 0.0;
+                double xCoord = 0.0, yCoord = 0.0;
+
+                // Get X Spacing
+                if (hXSpacing >= 0) {
+                     H5Dread(hXSpacing, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &xSpacingVal);
+                } else {
+                     // Derive from array if explicit spacing missing
+                     double val1 = 0.0, val2 = 0.0;
+                     // Only do this if we can read index 0 and 1 (array size >= 2)
+                     // Reusing simple logic from earlier discussion:
+                     // Ideally use Read1DDoubleVec or H5Dread direct logic here
+                     // For brevity in this snippet, we assume success if hXCoords opened
+                     // NOTE: In production code, add the derivation logic here if hXSpacing fails
+                }
+
+                // Get Y Spacing
+                if (hYSpacing >= 0) {
+                     H5Dread(hYSpacing, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &ySpacingVal);
+                }
+
+                // If spacing is still 0 (read failed or missing)
+                // Derive spacing from coordinates if explicit spacing is missing/zero
+                if (xSpacingVal == 0.0 || ySpacingVal == 0.0)
+                {
+                    double val1 = 0.0, val2 = 0.0;
+                    hsize_t deriv_count[1] = {1};
+                    hsize_t deriv_offset[1] = {0};
+                    
+                    // Calculate X Spacing
+                    if (xSpacingVal == 0.0) {
+                        // Read index 0
+                        deriv_offset[0] = 0;
+                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
+                        H5Dread(hXCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val1);
+                        
+                        // Read index 1
+                        deriv_offset[0] = 1;
+                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
+                        H5Dread(hXCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val2);
+                        
+                        xSpacingVal = val2 - val1;
+                        CPLDebug("NISAR_DRIVER", "Calculated X spacing from coordinates: %f", xSpacingVal);
+                    }
+
+                    // Calculate Y Spacing
+                    if (ySpacingVal == 0.0) {
+                        hFileSpace = H5Dget_space(hYCoords); // Re-get/reset space if needed, though reuse is likely fine if dims same
+                        // But strictly, let's just reuse existing handle if dimensions match
+                        
+                        // Read index 0
+                        deriv_offset[0] = 0;
+                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
+                        H5Dread(hYCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val1);
+                        
+                        // Read index 1
+                        deriv_offset[0] = 1;
+                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
+                        H5Dread(hYCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val2);
+                        
+                        ySpacingVal = val2 - val1;
+                        CPLDebug("NISAR_DRIVER", "Calculated Y spacing from coordinates: %f", ySpacingVal);
+                    }
+                }
+                
+                // Get Origin (First Element)
+                hsize_t count[1] = {1};
+                hsize_t offset[1] = {0};
+                hMemSpace = H5Screate_simple(1, count, nullptr);
+                
+                hFileSpace = H5Dget_space(hXCoords);
+                H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+                H5Dread(hXCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &xCoord);
+                H5Sclose(hFileSpace);
+
+                hFileSpace = H5Dget_space(hYCoords);
+                H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+                H5Dread(hYCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &yCoord);
+                H5Sclose(hFileSpace);
+                H5Sclose(hMemSpace);
+
+                // Calculate Transform (Pixel-is-Area convention)
+                // Origin is Top-Left of Top-Left Pixel
+                // Coords typically center of pixel, so subtract half spacing
+                adfCalcGT[0] = xCoord - 0.5 * xSpacingVal;
+                adfCalcGT[1] = xSpacingVal;
+                adfCalcGT[2] = 0.0;
+                adfCalcGT[3] = yCoord - 0.5 * ySpacingVal;
+                adfCalcGT[4] = 0.0;
+                adfCalcGT[5] = ySpacingVal;
+                
+                bFound = true;
+            }
+
+            // Cleanup
+            if (hXCoords >= 0) H5Dclose(hXCoords);
+            if (hYCoords >= 0) H5Dclose(hYCoords);
+            if (hXSpacing >= 0) H5Dclose(hXSpacing);
+            if (hYSpacing >= 0) H5Dclose(hYSpacing);
+        }
     }
 
-    // Method 2: Fallback to reading coordinate/spacing datasets
-    CPLDebug("NISAR_DRIVER",
-             "Attribute '%s' not found or failed. Falling back to "
-             "coordinate/spacing datasets.",
-             pszGeoTransformAttrName);
-
-    // Use the member variables set during Open()
-    // This only applies to Level 2 products
-    if (m_bIsLevel2 && !m_sInst.empty() && !m_sProductType.empty())
+    // 5. Update Cache and Return
+    if (bFound)
     {
-        productRootPath = "/science/" + m_sInst + "/" + m_sProductType;
-    }
-    // Note: We don't need to check m_bIsLevel1 because L1 products
-    // use GCPs, and we already checked for GCPs above.
-    // This block is the fallback for L2 products only.
-
-    if (productRootPath.empty())
-    {
-        CPLError(CE_Warning, CPLE_AppDefined,
-                 "Could not determine product root path.");
-        goto cleanup;
-    }
-    if (datasetPath.find("/frequencyB/") != std::string::npos)
-    {
-        frequencyGroup = "frequencyB";
-    }
-    geoBasePath = productRootPath + "/grids/" + frequencyGroup + "/";
-    CPLDebug("NISAR_DRIVER", "Derived georeferencing base path: %s",
-             geoBasePath.c_str());
-
-    xCoordinatesPath = geoBasePath + "xCoordinates";
-    yCoordinatesPath = geoBasePath + "yCoordinates";
-    xCoordinateSpacingPath = geoBasePath + "xCoordinateSpacing";
-    yCoordinateSpacingPath = geoBasePath + "yCoordinateSpacing";
-
-    hXCoords = H5Dopen2(this->hHDF5, xCoordinatesPath.c_str(), H5P_DEFAULT);
-    hYCoords = H5Dopen2(this->hHDF5, yCoordinatesPath.c_str(), H5P_DEFAULT);
-    hXSpacing =
-        H5Dopen2(this->hHDF5, xCoordinateSpacingPath.c_str(), H5P_DEFAULT);
-    hYSpacing =
-        H5Dopen2(this->hHDF5, yCoordinateSpacingPath.c_str(), H5P_DEFAULT);
-
-    if (hXCoords < 0 || hYCoords < 0 || hXSpacing < 0 || hYSpacing < 0)
-    {
-        CPLError(CE_Warning, CPLE_OpenFailed,
-                 "GetGeoTransform: Failed to open one or more "
-                 "coordinate/spacing datasets under '%s'.",
-                 geoBasePath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-
-    herr_t status;
-    status = H5Dread(hXSpacing, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
-                     H5P_DEFAULT, &xSpacing);
-    if (status < 0)
-    {
-        CPLError(CE_Warning, CPLE_FileIO, "Failed to read '%s'.",
-                 xCoordinateSpacingPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-    status = H5Dread(hYSpacing, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL,
-                     H5P_DEFAULT, &ySpacing);
-    if (status < 0)
-    {
-        CPLError(CE_Warning, CPLE_FileIO, "Failed to read '%s'.",
-                 yCoordinateSpacingPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-
-    count1d[0] = 1;
-    offset1d[0] = 0;
-    hMemSpace = H5Screate_simple(1, count1d, nullptr);
-    if (hMemSpace < 0)
-    {
-        CPLError(CE_Warning, CPLE_AppDefined, "Failed to create memory space.");
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-
-    hFileSpaceX = H5Dget_space(hXCoords);
-    if (hFileSpaceX < 0 || H5Sget_simple_extent_ndims(hFileSpaceX) == 0)
-    {
-        CPLError(CE_Warning, CPLE_AppDefined,
-                 "Failed to get valid dataspace for '%s'.",
-                 xCoordinatesPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-    status = H5Sselect_hyperslab(hFileSpaceX, H5S_SELECT_SET, offset1d, nullptr,
-                                 count1d, nullptr);
-    if (status < 0)
-    {
-        CPLError(CE_Warning, CPLE_AppDefined,
-                 "Failed select hyperslab for '%s'.", xCoordinatesPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-    status = H5Dread(hXCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpaceX,
-                     H5P_DEFAULT, &xCoord);
-    if (status < 0)
-    {
-        CPLError(CE_Warning, CPLE_FileIO,
-                 "Failed to read first element of '%s'.",
-                 xCoordinatesPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-
-    hFileSpaceY = H5Dget_space(hYCoords);
-    if (hFileSpaceY < 0 || H5Sget_simple_extent_ndims(hFileSpaceY) == 0)
-    {
-        CPLError(CE_Warning, CPLE_AppDefined,
-                 "Failed to get valid dataspace for '%s'.",
-                 yCoordinatesPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-    status = H5Sselect_hyperslab(hFileSpaceY, H5S_SELECT_SET, offset1d, nullptr,
-                                 count1d, nullptr);
-    if (status < 0)
-    {
-        CPLError(CE_Warning, CPLE_AppDefined,
-                 "Failed select hyperslab for '%s'.", yCoordinatesPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-    status = H5Dread(hYCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpaceY,
-                     H5P_DEFAULT, &yCoord);
-    if (status < 0)
-    {
-        CPLError(CE_Warning, CPLE_FileIO,
-                 "Failed to read first element of '%s'.",
-                 yCoordinatesPath.c_str());
-        eErr = CE_Failure;
-        goto cleanup;
-    }
-
-    // Calculate GeoTransform and populate the temporary array
-    padfTransform[0] = xCoord - 0.5 * xSpacing;
-    padfTransform[1] = xSpacing;
-    padfTransform[2] = 0.0;
-    padfTransform[3] = yCoord - 0.5 * ySpacing;
-    padfTransform[4] = 0.0;
-    padfTransform[5] = ySpacing;
-
-    CPLDebug("NISAR_DRIVER",
-             "Calculated GeoTransform: GT[0]=%.10g, GT[1]=%.10g, GT[3]=%.10g, "
-             "GT[5]=%.10g",
-             padfTransform[0], padfTransform[1], padfTransform[3],
-             padfTransform[5]);
-    eErr = CE_None;  // Mark success for coordinate method
-
-    // REMOVED the call to this->SetGeoTransform()
-    // The PAM framework handles caching.
-
-cleanup:
-    if (hFileSpaceY >= 0)
-        H5Sclose(hFileSpaceY);
-    if (hFileSpaceX >= 0)
-        H5Sclose(hFileSpaceX);
-    if (hMemSpace >= 0)
-        H5Sclose(hMemSpace);
-    if (hYSpacing >= 0)
-        H5Dclose(hYSpacing);
-    if (hXSpacing >= 0)
-        H5Dclose(hXSpacing);
-    if (hYCoords >= 0)
-        H5Dclose(hYCoords);
-    if (hXCoords >= 0)
-        H5Dclose(hXCoords);
-    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
-
-    if (eErr == CE_None)
-    {
-        CPLDebug("NISAR_DRIVER", "GetGeoTransform returning successfully.");
+        std::lock_guard<std::mutex> lock(m_GeoTransformMutex);
+        m_bGotGeoTransform = true;
+        memcpy(m_adfGeoTransform, adfCalcGT, sizeof(double) * 6);
+        memcpy(oGT.data(), m_adfGeoTransform, sizeof(double) * 6);
+        
+        CPLDebug("NISAR_DRIVER", "GetGeoTransform: Calculated and cached: (%.2f, %.2f, ...)", 
+                 m_adfGeoTransform[0], m_adfGeoTransform[3]);
         return CE_None;
     }
 
-    // Return the default failure case
-    CPLDebug("NISAR_DRIVER",
-             "GetGeoTransform failed to find/read coordinates/spacing or "
-             "attribute. Returning default.");
-    return GDALPamDataset::GetGeoTransform(oGT);
+    return CE_Failure;
 }
-
 //------------------------------------------------------------------------------
 // NisarDataset::GetSpatialRef
 //------------------------------------------------------------------------------

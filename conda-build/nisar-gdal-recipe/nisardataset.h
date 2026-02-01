@@ -18,6 +18,7 @@
 #include <map>
 #include <mutex>
 #include <cstring>  // For memcpy
+
 #include "cpl_string.h"
 #include "cpl_error.h"
 #include "cpl_list.h"
@@ -55,7 +56,10 @@ class NisarDataset : public GDALPamDataset
     mutable bool m_bGotSRS = false;  //Flag indicating if SRS was fetched
     mutable bool m_bGotGlobalMetadata = false;
     mutable bool m_bGotMetadata = false;  // Flag for default domain HDF5 read
-    // mutable bool m_bGotGeoTransform = false; // If caching GT
+    // GeoTransform Caching
+    mutable bool m_bGotGeoTransform = false;
+    mutable double m_adfGeoTransform[6]; 
+    mutable std::mutex m_GeoTransformMutex;
     //
     // Cached Objects / Data (Declare together)
     mutable OGRSpatialReference *m_poSRS = nullptr;  // Cached SRS object
