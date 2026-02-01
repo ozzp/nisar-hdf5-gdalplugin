@@ -15,8 +15,10 @@
 
 #include <string>
 #include <vector>
+#include <map>
 #include <mutex>
 #include <cstring>  // For memcpy
+
 #include "cpl_string.h"
 #include "cpl_error.h"
 #include "cpl_list.h"
@@ -54,7 +56,10 @@ class NisarDataset : public GDALPamDataset
     mutable bool m_bGotSRS = false;  //Flag indicating if SRS was fetched
     mutable bool m_bGotGlobalMetadata = false;
     mutable bool m_bGotMetadata = false;  // Flag for default domain HDF5 read
-    // mutable bool m_bGotGeoTransform = false; // If caching GT
+    // GeoTransform Caching
+    mutable bool m_bGotGeoTransform = false;
+    mutable double m_adfGeoTransform[6]; 
+    mutable std::mutex m_GeoTransformMutex;
     //
     // Cached Objects / Data (Declare together)
     mutable OGRSpatialReference *m_poSRS = nullptr;  // Cached SRS object
@@ -77,6 +82,18 @@ class NisarDataset : public GDALPamDataset
     std::string m_sPol;  // HH, HV, etc.
 
   private:  // Keep static helpers private if only used internally
+    struct MetadataCategory {
+        std::string sHDF5Path;      
+        std::string sGDALDomain;    
+    };
+    std::map<std::string, MetadataCategory> m_oMetadataMap;
+
+    void InitializeMetadataMap();
+    void LoadMetadataDomain(const std::string& sKeyword);
+
+    // Static callback for H5Ovisit
+    static herr_t MetadataVisitCallback(hid_t hObject, const char *name, const H5O_info2_t *info, void *op_data);
+
     void ReadIdentificationMetadata();
     std::string ReadHDF5StringArrayAsList(hid_t hParentGroup, const char *pszDatasetName);
     std::string ReadHDF5StringDataset(hid_t hParentGroup, const char *pszDatasetName);
