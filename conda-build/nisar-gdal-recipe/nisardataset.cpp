@@ -476,7 +476,7 @@ static std::string ReadH5StringAttribute(hid_t hObjectID, const char *pszAttrNam
     hid_t hAttrType = H5Aget_type(hAttr);
     hid_t hAttrSpace = H5Aget_space(hAttr);
     
-    // Create a native memory type for reading strings
+    // --- CRITICAL FIX: Create a native memory type for reading strings ---
     // This ensures HDF5 handles the conversion from NULLPAD (File) to NULLTERM (Memory)
     hid_t hMemType = H5Tcopy(H5T_C_S1);
 
@@ -1253,6 +1253,7 @@ static std::string Read1DArraySummary(hid_t hGroup, const char *pszDsetName,
     if (hNativeDtype < 0)
         goto cleanup;  // Add check in case native type fails
     type_class = H5Tget_class(hNativeDtype);
+    // ---
 
     if (H5Sget_simple_extent_ndims(hSpace) != 1)
     {
@@ -1482,7 +1483,7 @@ static std::string Read1DArraySummary(hid_t hGroup, const char *pszDsetName,
                 }
             }
         }
-        else  // Handle other types
+        else  // --- Handle other types ---
         {
             sResult = "(unsupported data type)";
         }
@@ -2841,6 +2842,12 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         CPLFree(pszActualFilename);
         return nullptr;
     }
+
+    const char* pszMaskOpt = CSLFetchNameValue(poOpenInfo->papszOpenOptions, "MASK");
+    if (pszMaskOpt && !CPLTestBool(pszMaskOpt)) {
+        poDS->m_bMaskEnabled = false;
+        CPLDebug("NISAR_DRIVER", "Masking disabled by user request (-oo MASK=NO).");
+    }
  
     // Assign handles and critical info to the dataset object
     // The NisarDataset destructor must handle closing/freeing these
@@ -3487,6 +3494,57 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         }
     }
     // End DERIVED_SUBDATASETS
+
+    ///////////////////////////////////////////////////////////////////////
+    // Mask Layer Support
+    // 
+    // Check if the dataset being opened is the mask layer.
+    // We check both the input path variable and the dataset description/metadata.
+    //
+    bool bIsMask = false;
+    
+    // Check Explicit path variable from Open() logic
+    if (pathToOpen && std::string(pathToOpen).find("/mask") != std::string::npos) {
+        bIsMask = true;
+    }
+    
+    // Check Fallback check against stored HDF5 path metadata
+    if (!bIsMask) {
+        const char* pszH5Path = poDS->GetMetadataItem("HDF5_PATH");
+        if (pszH5Path && std::string(pszH5Path).find("/mask") != std::string::npos) {
+            bIsMask = true;
+        }
+    }
+
+    if (bIsMask)
+    {
+        CPLDebug("NISAR_DRIVER", "Applying NISAR Mask Layer metadata (NoData=255, Categories) to band.");
+
+        GDALRasterBand* poBand = poDS->GetRasterBand(1);
+        if (poBand)
+        {
+            // Set Fill Value (255)
+            // This allows GIS software to make the border transparent automatically.
+            poBand->SetNoDataValue(255.0);
+
+            // Set Category Names (Classes 0-5)
+            // This allows 'gdalinfo' and GIS legends to show text instead of numbers.
+            char** papszCategories = nullptr;
+            papszCategories = CSLAddString(papszCategories, "Invalid or partially focused"); // 0
+            papszCategories = CSLAddString(papszCategories, "Valid (Sub-swath 1)");        // 1
+            papszCategories = CSLAddString(papszCategories, "Valid (Sub-swath 2)");        // 2
+            papszCategories = CSLAddString(papszCategories, "Valid (Sub-swath 3)");        // 3
+            papszCategories = CSLAddString(papszCategories, "Valid (Sub-swath 4)");        // 4
+            papszCategories = CSLAddString(papszCategories, "Valid (Sub-swath 5)");        // 5
+            
+            poBand->SetCategoryNames(papszCategories);
+            CSLDestroy(papszCategories);
+
+            // Set Color Interpretation to Palette
+            // This is the standard GDAL hint that "Category Names" are present.
+            poBand->SetColorInterpretation(GCI_PaletteIndex);
+        }
+    }
 
     poDS->TryLoadXML();  // Initialize PAM system (loads .aux.xml if present)
 
