@@ -80,6 +80,7 @@ class NisarDataset : public GDALPamDataset
     std::string m_sInst; // LSAR or SSAR
     std::string m_sFreq; // A or B
     std::string m_sPol;  // HH, HV, etc.
+    bool m_bMaskEnabled = true; //Default to YES
 
   private:  // Keep static helpers private if only used internally
     struct MetadataCategory {

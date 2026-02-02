@@ -134,7 +134,88 @@ NisarRasterBand::~NisarRasterBand()
              CPLError(CE_Warning, CPLE_AppDefined, "Failed to close HDF5 data type handle in ~NisarRasterBand.");
         }
     }
+    if (m_bMaskBandOwned && m_poMaskBand) {
+        delete m_poMaskBand;
+    }
 }
+
+int NisarRasterBand::GetMaskFlags()
+{
+    // Trigger discovery via GetMaskBand() to see if we populate m_poMaskBand
+    GetMaskBand();
+
+    // If we successfully created a custom NISAR mask band, declare it as shared.
+    if (m_poMaskBand) {
+        return GMF_PER_DATASET;
+    }
+
+    // Otherwise, per GDAL RFC 15, we declare that all pixels are valid.
+    return GMF_ALL_VALID;
+}
+
+GDALRasterBand* NisarRasterBand::GetMaskBand()
+{
+    // Return cached if exists
+    if (m_poMaskBand) return m_poMaskBand;
+
+    //  Cast the dataset
+    NisarDataset* poNisarDS = (NisarDataset*)poDS;
+    if (!poNisarDS) return GDALPamRasterBand::GetMaskBand();
+
+    // If user explicitly disabled masks via -oo MASK=NO, return "All Valid"
+    if (!poNisarDS->m_bMaskEnabled) {
+        return GDALPamRasterBand::GetMaskBand(); 
+    }
+
+    // Construct Mask Path
+    // Instead of relying on metadata, we ask HDF5 for the true path of the current dataset.
+    // get_hdf5_object_name is defined in nisar_priv.h
+    std::string sBandPath = get_hdf5_object_name(poNisarDS->GetDatasetHandle());
+    
+    if (sBandPath.empty()) {
+        // Fallback: If HDF5 name query fails, try metadata (though unlikely to be needed)
+        const char* pszPath = poNisarDS->GetMetadataItem("HDF5_PATH");
+        if (pszPath) sBandPath = pszPath;
+    }
+
+    if (sBandPath.empty()) return GDALPamRasterBand::GetMaskBand();
+
+    // Find the parent group (e.g., remove "/HHHH" from ".../frequencyA/HHHH")
+    size_t nLastSlash = sBandPath.find_last_of('/');
+    if (nLastSlash == std::string::npos) return GDALPamRasterBand::GetMaskBand();
+
+    // Construct sibling path: ".../frequencyA/mask"
+    std::string sMaskPath = sBandPath.substr(0, nLastSlash) + "/mask";
+
+    // Try to Open the Mask Dataset
+    H5E_auto2_t old_func; void *old_client_data;
+    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+    
+    hid_t hMaskDS = H5Dopen2(poNisarDS->GetHDF5Handle(), sMaskPath.c_str(), H5P_DEFAULT);
+    
+    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
+
+    if (hMaskDS < 0) {
+        return GDALPamRasterBand::GetMaskBand(); // No mask found
+    }
+
+    // Determine Mask Logic Type
+    NisarMaskType eMaskType = NisarMaskType::GCOV; // Default
+    
+    // Check product type 
+    // We access m_sProductType directly since NisarRasterBand is a friend class
+    if (poNisarDS->m_sProductType == "GUNW") {
+        eMaskType = NisarMaskType::GUNW;
+    }
+
+    // Instantiate the correct class
+    m_poMaskBand = new NisarHDF5MaskBand(poNisarDS, hMaskDS, eMaskType);
+    m_bMaskBandOwned = true;
+
+    return m_poMaskBand;
+}
+
 // NisarRasterBand::GetMetadata
 char **NisarRasterBand::GetMetadata( const char *pszDomain )
 {
@@ -303,4 +384,110 @@ double NisarRasterBand::GetNoDataValue( int *pbSuccess )
         *pbSuccess = FALSE;
 
     return 0.0;
+}
+
+// ====================================================================
+// NisarHDF5MaskBand Implementation (Corrected Name)
+// ====================================================================
+
+NisarHDF5MaskBand::NisarHDF5MaskBand(NisarDataset* poDSIn, hid_t hMaskDS, NisarMaskType eType) :
+    m_hMaskDS(hMaskDS),
+    m_eType(eType) // FIX 3: This now works because eType is in the arguments
+{
+    this->poDS = poDSIn;
+    this->nBand = 0; // Mask bands usually have nBand=0
+    this->eDataType = GDT_Byte;
+
+    // Copy dimensions/blocking from the parent dataset
+    this->nRasterXSize = poDSIn->GetRasterXSize();
+    this->nRasterYSize = poDSIn->GetRasterYSize();
+    
+    // Get chunk size from HDF5 to optimize I/O
+    hid_t hDAPL = H5Dget_create_plist(m_hMaskDS);
+    if (H5Pget_layout(hDAPL) == H5D_CHUNKED) {
+        hsize_t chunk_dims[2];
+        H5Pget_chunk(hDAPL, 2, chunk_dims);
+        this->nBlockXSize = static_cast<int>(chunk_dims[1]); // X is last dim
+        this->nBlockYSize = static_cast<int>(chunk_dims[0]);
+    } else {
+        // Fallback if not chunked (unlikely for L2)
+        this->nBlockXSize = this->nRasterXSize;
+        this->nBlockYSize = 1;
+    }
+    H5Pclose(hDAPL);
+}
+
+NisarHDF5MaskBand::~NisarHDF5MaskBand()
+{
+    if (m_hMaskDS >= 0) {
+        H5Dclose(m_hMaskDS);
+    }
+}
+
+CPLErr NisarHDF5MaskBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
+{
+    // Calculate offsets for HDF5 Hyperslab
+    hsize_t offset[2] = { 
+        static_cast<hsize_t>(nBlockYOff) * nBlockYSize, 
+        static_cast<hsize_t>(nBlockXOff) * nBlockXSize 
+    };
+    
+    // Handle edge blocks
+    int nRequestX = nBlockXSize;
+    int nRequestY = nBlockYSize;
+    if (offset[0] + nRequestY > static_cast<hsize_t>(nRasterYSize))
+        nRequestY = nRasterYSize - offset[0];
+    if (offset[1] + nRequestX > static_cast<hsize_t>(nRasterXSize))
+        nRequestX = nRasterXSize - offset[1];
+
+    hsize_t count[2] = { static_cast<hsize_t>(nRequestY), static_cast<hsize_t>(nRequestX) };
+    
+    // Read Raw Data
+    hid_t hMemSpace = H5Screate_simple(2, count, nullptr);
+    hid_t hFileSpace = H5Dget_space(m_hMaskDS);
+    H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
+
+    // Read into the buffer provided by GDAL
+    GByte* pbyBuffer = static_cast<GByte*>(pImage);
+    
+    herr_t status = H5Dread(m_hMaskDS, H5T_NATIVE_UINT8, hMemSpace, hFileSpace, H5P_DEFAULT, pbyBuffer);
+    
+    H5Sclose(hFileSpace);
+    H5Sclose(hMemSpace);
+
+    if (status < 0) return CE_Failure;
+
+    int nPixels = nRequestX * nRequestY;
+    
+    // EXTENSIBLE VALIDITY LOGIC
+    if (m_eType == NisarMaskType::GCOV)
+    {
+        for(int i = 0; i < nPixels; i++) {
+            GByte v = pbyBuffer[i];
+            // GCOV/GSLC: 1-5 is Valid. 0 is Invalid. 255 is Fill.
+            // GDAL Standard: 255=Valid, 0=Invalid
+            pbyBuffer[i] = (v >= 1 && v <= 5) ? 255 : 0;
+        }
+    }
+    else if (m_eType == NisarMaskType::GUNW)
+    {
+        for(int i = 0; i < nPixels; i++) {
+            GByte v = pbyBuffer[i];
+            
+            if (v == 255) {
+                pbyBuffer[i] = 0; // Fill is Invalid
+            } else {
+                // Parse 3-digit decimal: Water|RefSub|SecSub
+                // Example: 123 -> Water=1, Ref=2, Sec=3
+                // Valid if BOTH subswaths are non-zero.
+                int nRefSubswath = (v / 10) % 10;
+                int nSecSubswath = v % 10;
+                
+                // GDAL Mask: 255=Valid, 0=Invalid
+                pbyBuffer[i] = (nRefSubswath > 0 && nSecSubswath > 0) ? 255 : 0;
+            }
+        }
+    }
+
+    return CE_None;
 }

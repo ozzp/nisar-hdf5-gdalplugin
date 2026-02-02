@@ -5,6 +5,7 @@
 #include "cpl_string.h"  // For CSLSetNameValue, CPLDebug, CPLError
 #include "cpl_conv.h"    // For CPLStrdup, CPLFree
 #include "cpl_error.h"
+#include "gdal_priv.h"
 #include "gdal.h"  // For CE_Failure etc.
 
 #include <string>
@@ -12,6 +13,23 @@
 #include <sstream>
 #include <iomanip>
 #include <limits>
+
+// Define the logic strategy for the mask
+enum class NisarMaskType {
+    GCOV, // Logic: 1-5 Valid; 0, 255 Invalid
+    GUNW  // Logic: Digit parsing (Ref != 0 && Sec != 0)
+};
+
+class NisarHDF5MaskBand final: public GDALRasterBand
+{
+    hid_t m_hMaskDS; 
+    NisarMaskType m_eType; // Store the logic type
+
+public:
+    NisarHDF5MaskBand(NisarDataset* poDS, hid_t hMaskDS, NisarMaskType eType);
+    virtual ~NisarHDF5MaskBand();
+    virtual CPLErr IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage) override;
+};
 
 /**
  * Gets the full HDF5 path of an object from its handle (hid_t).
@@ -387,7 +405,7 @@ static herr_t NISAR_AttributeCallback(hid_t hLocation, const char *attr_name,
         // END COMPOUND
         else if (type_class == H5T_VLEN)
         {
-            // --- VLEN handling (unchanged placeholder) ---
+            // VLEN handling (unchanged placeholder)
             value_str = "(variable-length data)";
         }
     }

@@ -20,6 +20,7 @@
 #include "hdf5.h"
 
 class NisarDataset;
+class NisarHDF5MaskBand;
 
 /************************************************************************/
 /* ==================================================================== */
@@ -47,6 +48,9 @@ class NisarRasterBand final : public GDALPamRasterBand
         false;  // Flag: Have we read HDF5 attrs for default domain?
     mutable std::mutex m_MetadataMutex;  // Mutex for metadata access
 
+    NisarHDF5MaskBand* m_poMaskBand = nullptr; // Cache the mask band
+    bool m_bMaskBandOwned = false;
+
   public:
     NisarRasterBand(NisarDataset *poDSIn, int nBandIn, hid_t hDatasetID,
                     hid_t hH5DatasetType);
@@ -57,6 +61,9 @@ class NisarRasterBand final : public GDALPamRasterBand
     double GetNoDataValue(int *pbSuccess = nullptr) override;
     // Add Metadata override
     char **GetMetadata(const char *pszDomain = "") override;
+
+    virtual GDALRasterBand* GetMaskBand() override;
+    virtual int GetMaskFlags() override;
 
     // Add getter if needed outside
     // hid_t GetH5Type() const { return hH5Type; }
