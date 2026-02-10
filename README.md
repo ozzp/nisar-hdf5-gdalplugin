@@ -84,7 +84,7 @@ gdal_translate -of GTiff \
 ```shell
 # Use -tps for the most accurate reprojection
 gdalwarp -t_srs EPSG:4326 -tps -r cubic \
-    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/grids/frequencyA/HH' \
+    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
     output_warped_high_accuracy.tif
 ```
 
@@ -93,7 +93,7 @@ gdalwarp -t_srs EPSG:4326 -tps -r cubic \
 ```shell
 # Use -order 2 for a fast preview
 gdalwarp -t_srs EPSG:4326 -order 2 -r cubic \
-    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/grids/frequencyA/HH' \
+    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
     output_warped_preview.tif
 ```
 
@@ -167,7 +167,7 @@ from osgeo import gdal
 
 gdal.UseExceptions()
 
-file_path = 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/RSLC/grids/frequencyA/HH'
+file_path = 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH'
 print(f"\nAttempting to open dataset: {file_path}")
 
 try:
