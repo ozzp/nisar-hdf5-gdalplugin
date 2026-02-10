@@ -68,7 +68,7 @@ gdalinfo NISAR:/path/to/local/NISAR_L2_file.h5
 
 ```shell
 # Assumes AWS env vars are set per the "AWS Authentication" section above
-gdalinfo 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/GSLC/swaths/frequencyA/HH'
+gdalinfo 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/GSLC/grids/frequencyA/HH'
 ```
 
 #### Convert a specific L2 subdataset to GeoTIFF
@@ -84,7 +84,7 @@ gdal_translate -of GTiff \
 ```shell
 # Use -tps for the most accurate reprojection
 gdalwarp -t_srs EPSG:4326 -tps -r cubic \
-    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
+    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/grids/frequencyA/HH' \
     output_warped_high_accuracy.tif
 ```
 
@@ -93,7 +93,7 @@ gdalwarp -t_srs EPSG:4326 -tps -r cubic \
 ```shell
 # Use -order 2 for a fast preview
 gdalwarp -t_srs EPSG:4326 -order 2 -r cubic \
-    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH' \
+    'NISAR:/path/to/local/L1_RSLC_file.h5:/science/LSAR/RSLC/grids/frequencyA/HH' \
     output_warped_preview.tif
 ```
 
@@ -167,7 +167,7 @@ from osgeo import gdal
 
 gdal.UseExceptions()
 
-file_path = 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/RSLC/swaths/frequencyA/HH'
+file_path = 'NISAR:s3://my-bucket/path/to/file.h5:/science/LSAR/RSLC/grids/frequencyA/HH'
 print(f"\nAttempting to open dataset: {file_path}")
 
 try:
@@ -186,7 +186,7 @@ except Exception as e:
 
       * **`NisarDataset` (subclass of `GDALDataset`):** This class serves as the main entry point for interacting with a NISAR HDF5 file.
       * **Core Functionality:** As a subclass of `GDALDataset`, it represents the entire file. It is responsible for parsing the user-provided connection string, which can be a path to a local file or an S3 URL.
-      * **Data Access:** It can open a specific data path (e.g., `/science/LSAR/GSLC/swaths/frequencyA/HH`) within the HDF5 file. If no specific path is given, it will automatically search the file for compatible raster datasets and present them as GDAL subdatasets.
+      * **Data Access:** It can open a specific data path (e.g., `/science/LSAR/GSLC/grids/frequencyA/HH`) within the HDF5 file. If no specific path is given, it will automatically search the file for compatible raster datasets and present them as GDAL subdatasets.
       * **Georeferencing:** It extracts the spatial reference system (SRS) and calculates the geotransform, enabling GDAL to correctly position the raster in geographic space.
       * **Metadata:** It reads and exposes metadata from the HDF5 file. For container datasets, it reads file-level metadata. For raster datasets, it reads both dataset-specific attributes and relevant auxiliary metadata (e.g., `numberOfSubSwaths`).
 
