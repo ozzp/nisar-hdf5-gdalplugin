@@ -16,6 +16,7 @@ This document provides instructions for building the `gdal-driver-nisar` conda p
     conda config --add channels conda-forge
     conda config --set channel_priority strict
     ```
+4.  **HDF5 (Read-Only) S3 VFD**: Make sure HDF5 library is installed.  For access of source object from AWS, make sure that HDF5 Version is 1.14.4 or higher and run "h5cc -showconfig" to confirm that (Read-Only) S3 VFD: yes" 
 
 -----
 
