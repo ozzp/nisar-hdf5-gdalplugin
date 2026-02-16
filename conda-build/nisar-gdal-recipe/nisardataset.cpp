@@ -197,6 +197,7 @@ std::string NisarDataset::ReadHDF5StringDataset(hid_t hParentGroup,
     // Create memory type for reading
     hMemType = H5Tcopy(H5T_C_S1);
     H5Tset_size(hMemType, nSize + 1); // +1 for null terminator
+    H5Tset_strpad(hMemType, H5T_STR_NULLTERM);  // Explicitly ask for Null Term
 
     // Read the string
     pszBuffer = (char *)CPLMalloc(nSize + 1);
@@ -394,6 +395,15 @@ void NisarDataset::ReadIdentificationMetadata()
     else if (EQUAL(sProductLevel.c_str(), "L2"))
     {
         m_bIsLevel2 = true;
+    }
+
+    // If productLevel was missing or weird, we force Level 2 for known grid types.
+    if (EQUAL(m_sProductType.c_str(), "GUNW") || 
+        EQUAL(m_sProductType.c_str(), "GCOV") || 
+        EQUAL(m_sProductType.c_str(), "GSLC"))
+    {
+        m_bIsLevel2 = true;
+        m_bIsLevel1 = false; 
     }
 
     // Restore HDF5 error handling
@@ -642,7 +652,9 @@ static herr_t NISAR_IdentificationDatasetCallback(hid_t group_id,
             }
             else if (type_size > 0)
             {  // Fixed length string
-                H5Tset_size(mem_type, type_size);
+                // We must allocate type_size + 1 in the MEMORY type to hold the null terminator.
+                // If we use type_size, HDF5 will truncate the string to make room for \0.
+                H5Tset_size(mem_type, type_size+1);
                 H5Tset_strpad(mem_type, H5T_STR_NULLTERM);
                 pszReadFixed = (char *)VSIMalloc(type_size + 1);
                 if (pszReadFixed)
@@ -3598,205 +3610,175 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 /************************************************************************/
 CPLErr NisarDataset::GetGeoTransform(GDALGeoTransform &oGT) const
 {
-    // Check PAM (Persistent Aux Metadata) first.
-    // This allows users to manually override georeferencing via .aux.xml
-    if (GDALPamDataset::GetGeoTransform(oGT) == CE_None)
-    {
-        return CE_None;
-    }
+    // Check PAM (Persistent Aux Metadata) - Highest Priority
+    if (GDALPamDataset::GetGeoTransform(oGT) == CE_None) return CE_None;
 
-    // Check Internal Cache (Thread-Safe)
+    // Check Internal Cache
     {
         std::lock_guard<std::mutex> lock(m_GeoTransformMutex);
-        if (m_bGotGeoTransform)
-        {
+        if (m_bGotGeoTransform) {
             memcpy(oGT.data(), m_adfGeoTransform, sizeof(double) * 6);
             return CE_None;
         }
     }
 
-    // Check for GCPs (Level 1 Products)
-    // If we have GCPs, we should technically return CE_Failure for GeoTransform
-    // so that applications know to use the GCPs instead.
-    if (const_cast<NisarDataset *>(this)->GetGCPCount() > 0)
-    {
-        return CE_Failure; 
-    }
+    // Early Exit for Non-Grid Data
+    // If we have GCPs (Level 1 / Swaths), we should not return a GeoTransform.
+    if (const_cast<NisarDataset *>(this)->GetGCPCount() > 0) return CE_Failure;
+    if (hDataset < 0) return CE_Failure;
 
-    // Check if this is a valid raster dataset
-    if (hDataset < 0)
-    {
-        return CE_Failure;
-    }
+    CPLDebug("NISAR_DRIVER", "GetGeoTransform: Cache miss. Calculating...");
 
-    // CALCULATION LOGIC STARTS HERE
-    // (Only runs once per dataset open)
-
-    CPLDebug("NISAR_DRIVER", "GetGeoTransform: Cache miss. calculating...");
-
-    double adfCalcGT[6] = {0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-    bool bFound = false;
-
-    // Try reading standard 'GeoTransform' attribute directly
-    if (ReadGeoTransformAttribute(this->hDataset, "GeoTransform", oGT) == CE_None)
-    {
-        // oGT is populated by the helper, copy to local calc buffer
-        memcpy(adfCalcGT, oGT.data(), sizeof(double) * 6);
-        bFound = true;
-    }
-    else
-    {
-        // Fallback: coordinate/spacing datasets (Level 2)
-        if (m_bIsLevel2 && !m_sInst.empty() && !m_sProductType.empty())
-        {
-            std::string datasetPath = get_hdf5_object_name(this->hDataset);
-            std::string productRootPath = "/science/" + m_sInst + "/" + m_sProductType;
-            std::string frequencyGroup = "frequencyA";
-            
-            if (datasetPath.find("/frequencyB/") != std::string::npos)
-            {
-                frequencyGroup = "frequencyB";
-            }
-
-            std::string geoBasePath = productRootPath + "/grids/" + frequencyGroup + "/";
-            
-            std::string xCoordinatesPath = geoBasePath + "xCoordinates";
-            std::string yCoordinatesPath = geoBasePath + "yCoordinates";
-            std::string xSpacingPath = geoBasePath + "xCoordinateSpacing";
-            std::string ySpacingPath = geoBasePath + "yCoordinateSpacing";
-
-            // Local handles
-            hid_t hXCoords = -1, hYCoords = -1, hXSpacing = -1, hYSpacing = -1;
-            hid_t hMemSpace = -1, hFileSpace = -1;
-            
-            // Suppress errors during attempt
-            H5E_auto2_t old_func; void *old_client_data;
-            H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
-            H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
-
-            hXCoords = H5Dopen2(this->hHDF5, xCoordinatesPath.c_str(), H5P_DEFAULT);
-            hYCoords = H5Dopen2(this->hHDF5, yCoordinatesPath.c_str(), H5P_DEFAULT);
-            hXSpacing = H5Dopen2(this->hHDF5, xSpacingPath.c_str(), H5P_DEFAULT);
-            hYSpacing = H5Dopen2(this->hHDF5, ySpacingPath.c_str(), H5P_DEFAULT);
-
-            // Restore errors
-            H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
-
-            if (hXCoords >= 0 && hYCoords >= 0)
-            {
-                double xSpacingVal = 0.0, ySpacingVal = 0.0;
-                double xCoord = 0.0, yCoord = 0.0;
-
-                // Get X Spacing
-                if (hXSpacing >= 0) {
-                     H5Dread(hXSpacing, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &xSpacingVal);
-                } else {
-                     // Derive from array if explicit spacing missing
-                     double val1 = 0.0, val2 = 0.0;
-                     // Only do this if we can read index 0 and 1 (array size >= 2)
-                     // Reusing simple logic from earlier discussion:
-                     // Ideally use Read1DDoubleVec or H5Dread direct logic here
-                     // For brevity in this snippet, we assume success if hXCoords opened
-                     // NOTE: In production code, add the derivation logic here if hXSpacing fails
-                }
-
-                // Get Y Spacing
-                if (hYSpacing >= 0) {
-                     H5Dread(hYSpacing, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, &ySpacingVal);
-                }
-
-                // If spacing is still 0 (read failed or missing)
-                // Derive spacing from coordinates if explicit spacing is missing/zero
-                if (xSpacingVal == 0.0 || ySpacingVal == 0.0)
-                {
-                    double val1 = 0.0, val2 = 0.0;
-                    hsize_t deriv_count[1] = {1};
-                    hsize_t deriv_offset[1] = {0};
-                    
-                    // Calculate X Spacing
-                    if (xSpacingVal == 0.0) {
-                        // Read index 0
-                        deriv_offset[0] = 0;
-                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
-                        H5Dread(hXCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val1);
-                        
-                        // Read index 1
-                        deriv_offset[0] = 1;
-                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
-                        H5Dread(hXCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val2);
-                        
-                        xSpacingVal = val2 - val1;
-                        CPLDebug("NISAR_DRIVER", "Calculated X spacing from coordinates: %f", xSpacingVal);
-                    }
-
-                    // Calculate Y Spacing
-                    if (ySpacingVal == 0.0) {
-                        hFileSpace = H5Dget_space(hYCoords); // Re-get/reset space if needed, though reuse is likely fine if dims same
-                        // But strictly, let's just reuse existing handle if dimensions match
-                        
-                        // Read index 0
-                        deriv_offset[0] = 0;
-                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
-                        H5Dread(hYCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val1);
-                        
-                        // Read index 1
-                        deriv_offset[0] = 1;
-                        H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, deriv_offset, nullptr, deriv_count, nullptr);
-                        H5Dread(hYCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &val2);
-                        
-                        ySpacingVal = val2 - val1;
-                        CPLDebug("NISAR_DRIVER", "Calculated Y spacing from coordinates: %f", ySpacingVal);
-                    }
-                }
-                
-                // Get Origin (First Element)
-                hsize_t count[1] = {1};
-                hsize_t offset[1] = {0};
-                hMemSpace = H5Screate_simple(1, count, nullptr);
-                
-                hFileSpace = H5Dget_space(hXCoords);
-                H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
-                H5Dread(hXCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &xCoord);
-                H5Sclose(hFileSpace);
-
-                hFileSpace = H5Dget_space(hYCoords);
-                H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
-                H5Dread(hYCoords, H5T_NATIVE_DOUBLE, hMemSpace, hFileSpace, H5P_DEFAULT, &yCoord);
-                H5Sclose(hFileSpace);
-                H5Sclose(hMemSpace);
-
-                // Calculate Transform (Pixel-is-Area convention)
-                // Origin is Top-Left of Top-Left Pixel
-                // Coords typically center of pixel, so subtract half spacing
-                adfCalcGT[0] = xCoord - 0.5 * xSpacingVal;
-                adfCalcGT[1] = xSpacingVal;
-                adfCalcGT[2] = 0.0;
-                adfCalcGT[3] = yCoord - 0.5 * ySpacingVal;
-                adfCalcGT[4] = 0.0;
-                adfCalcGT[5] = ySpacingVal;
-                
-                bFound = true;
-            }
-
-            // Cleanup
-            if (hXCoords >= 0) H5Dclose(hXCoords);
-            if (hYCoords >= 0) H5Dclose(hYCoords);
-            if (hXSpacing >= 0) H5Dclose(hXSpacing);
-            if (hYSpacing >= 0) H5Dclose(hYSpacing);
-        }
-    }
-
-    // 5. Update Cache and Return
-    if (bFound)
-    {
+    // Try reading explicit 'GeoTransform' attribute (Generic Fallback)
+    if (ReadGeoTransformAttribute(this->hDataset, "GeoTransform", oGT) == CE_None) {
         std::lock_guard<std::mutex> lock(m_GeoTransformMutex);
         m_bGotGeoTransform = true;
-        memcpy(m_adfGeoTransform, adfCalcGT, sizeof(double) * 6);
-        memcpy(oGT.data(), m_adfGeoTransform, sizeof(double) * 6);
-        
-        CPLDebug("NISAR_DRIVER", "GetGeoTransform: Calculated and cached: (%.2f, %.2f, ...)", 
-                 m_adfGeoTransform[0], m_adfGeoTransform[3]);
+        memcpy(m_adfGeoTransform, oGT.data(), sizeof(double) * 6);
         return CE_None;
+    }
+
+    // Calculate from Coordinate Arrays (Walk-Up Discovery)
+    // This logic handles:
+    // Case A: Main Image Grids
+    //    Path: .../science/LSAR/GCOV/grids/frequencyA/HHHH
+    //    Coords: .../science/LSAR/GCOV/grids/frequencyA/xCoordinates
+    //
+    // Calibration Grids (Noise, etc.)
+    //    Path: .../metadata/calibrationInformation/frequencyA/noiseEquivalentBackscatter/HH
+    //    Coords: .../metadata/calibrationInformation/frequencyA/noiseEquivalentBackscatter/xCoordinates
+    
+    // Only attempt this for Level 2 products (GCOV, GUNW) which use defined grids
+    if (m_bIsLevel2)
+    {
+        std::string sCurrentPath = get_hdf5_object_name(this->hDataset);
+        
+        // Safety Check: Only scan for coordinates if we are in a known grid-like hierarchy
+        bool bIsStandardGrid = (sCurrentPath.find("/grids/") != std::string::npos);
+        bool bIsCalibrationGrid = (sCurrentPath.find("/calibrationInformation/") != std::string::npos);
+
+        if (bIsStandardGrid || bIsCalibrationGrid)
+        {
+            std::string sCoordsRoot;
+            std::string sSearchPath = sCurrentPath;
+
+            // 
+            // We strip one path component at a time to find the 'folder' containing xCoordinates
+            while (sSearchPath.length() > 1)
+            {
+                // Strip the last component (e.g., remove "/HH")
+                size_t nLastSlash = sSearchPath.find_last_of('/');
+                if (nLastSlash == std::string::npos || nLastSlash == 0) break;
+
+                sSearchPath = sSearchPath.substr(0, nLastSlash); 
+
+                // Check for sibling coordinates
+                std::string sTestX = sSearchPath + "/xCoordinates";
+                
+                // Fast existence check
+                H5E_auto2_t old_func; void *old_client_data;
+                H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+                H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr); // Suppress errors
+                htri_t exists = H5Lexists(this->hHDF5, sTestX.c_str(), H5P_DEFAULT);
+                H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore errors
+
+                if (exists > 0) {
+                    sCoordsRoot = sSearchPath;
+                    CPLDebug("NISAR_DRIVER", "GetGeoTransform: Found coordinate arrays at: %s", sCoordsRoot.c_str());
+                    break;
+                }
+            }
+
+            if (!sCoordsRoot.empty()) 
+            {
+                // Open and Read Coordinates
+                std::string sXCoordsPath = sCoordsRoot + "/xCoordinates";
+                std::string sYCoordsPath = sCoordsRoot + "/yCoordinates";
+
+                hid_t hX = H5Dopen2(this->hHDF5, sXCoordsPath.c_str(), H5P_DEFAULT);
+                hid_t hY = H5Dopen2(this->hHDF5, sYCoordsPath.c_str(), H5P_DEFAULT);
+
+                if (hX >= 0 && hY >= 0) 
+                {
+                    // Get Dimensions
+                    hsize_t dimsX[1] = {0}, dimsY[1] = {0};
+                    hid_t hSpaceX = H5Dget_space(hX);
+                    H5Sget_simple_extent_dims(hSpaceX, dimsX, nullptr);
+                    H5Sclose(hSpaceX);
+
+                    hid_t hSpaceY = H5Dget_space(hY);
+                    H5Sget_simple_extent_dims(hSpaceY, dimsY, nullptr);
+                    H5Sclose(hSpaceY);
+
+                    // Proceed only if we have valid arrays (>= 2 points needed for resolution)
+                    if (dimsX[0] >= 2 && dimsY[0] >= 2) 
+                    {
+                        // Helper Lambda to read scalar double at index
+                        auto ReadVal = [](hid_t hD, hsize_t idx) -> double {
+                            double val = 0.0;
+                            hsize_t count[1] = {1};
+                            hsize_t start[1] = {idx};
+                            hid_t hMem = H5Screate_simple(1, count, nullptr);
+                            hid_t hFile = H5Dget_space(hD);
+                            H5Sselect_hyperslab(hFile, H5S_SELECT_SET, start, nullptr, count, nullptr);
+                            if (H5Dread(hD, H5T_NATIVE_DOUBLE, hMem, hFile, H5P_DEFAULT, &val) < 0) val = 0.0;
+                            H5Sclose(hFile); H5Sclose(hMem);
+                            return val;
+                        };
+
+                        double dfXStart = ReadVal(hX, 0);
+                        double dfXEnd   = ReadVal(hX, dimsX[0] - 1);
+                        double dfYStart = ReadVal(hY, 0);
+                        double dfYEnd   = ReadVal(hY, dimsY[0] - 1);
+
+                        // Calculate GeoTransform
+                        // Calculate Pixel Size (Resolution)
+                        // Note: We use the array size (dims - 1) for the span.
+                        double resX = (dfXEnd - dfXStart) / static_cast<double>(dimsX[0] - 1);
+                        double resY = (dfYEnd - dfYStart) / static_cast<double>(dimsY[0] - 1);
+
+                        // Calculate Top-Left Corner (Origin)
+                        // NISAR coordinates represent Pixel Centers. 
+                        // GDAL GeoTransform[0],[3] represents Top-Left Corner.
+                        // We must shift by half a pixel.
+                        double dfULX = dfXStart - (0.5 * resX);
+                        double dfULY = dfYStart - (0.5 * resY);
+
+                        double adfCalcGT[6];
+                        adfCalcGT[0] = dfULX;       // Top-Left X
+                        adfCalcGT[1] = resX;        // W-E Resolution
+                        adfCalcGT[2] = 0.0;         // Rotation (0)
+                        adfCalcGT[3] = dfULY;       // Top-Left Y
+                        adfCalcGT[4] = 0.0;         // Rotation (0)
+                        adfCalcGT[5] = resY;        // N-S Resolution
+
+                        // Clean up HDF5 handles
+                        H5Dclose(hX); 
+                        H5Dclose(hY);
+
+                        // Cache and Return
+                        {
+                            std::lock_guard<std::mutex> lock(m_GeoTransformMutex);
+                            m_bGotGeoTransform = true;
+                            memcpy(m_adfGeoTransform, adfCalcGT, sizeof(double) * 6);
+                            memcpy(oGT.data(), m_adfGeoTransform, sizeof(double) * 6);
+                        }
+
+                        CPLDebug("NISAR_DRIVER", "GetGeoTransform: Derived from coordinates. Origin=(%.2f, %.2f) Res=(%.6f, %.6f)",
+                                 adfCalcGT[0], adfCalcGT[3], adfCalcGT[1], adfCalcGT[5]);
+
+                        return CE_None;
+                    }
+                }
+                
+                // Cleanup if we failed inside the block
+                if (hX >= 0) H5Dclose(hX);
+                if (hY >= 0) H5Dclose(hY);
+            }
+        }
+        else 
+        {
+            CPLDebug("NISAR_DRIVER", "GetGeoTransform: Path '%s' is not recognized as a grid or calibration layer. Skipping coordinate discovery.", sCurrentPath.c_str());
+        }
     }
 
     return CE_Failure;
