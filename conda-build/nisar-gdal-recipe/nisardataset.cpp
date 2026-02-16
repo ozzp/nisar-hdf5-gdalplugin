@@ -27,6 +27,16 @@
 #include "hdf5.h"
 #include "H5FDros3.h"  // For H5FD_ros3_fapl_t and H5FD_CURR_ROS3_FAPL_T_VERSION
 
+// Helper to handle API change between 3.10 and 3.12
+static std::string NisarGetExtension(const char* pszFilename)
+{
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 12)
+    return CPLGetExtensionSafe(pszFilename);
+#else
+    return std::string(CPLGetExtension(pszFilename));
+#endif
+}
+
 /**
  * \brief Helper function to read a 1D array of HDF5 strings.
  *
@@ -252,7 +262,7 @@ int NisarDataset::Identify(GDALOpenInfo *poOpenInfo)
 
     // 2. Check for standard .h5 file extension (Automatic Detection without prefix)
     // For files NOT starting with NISAR:, we strictly require the extension.
-    if (!EQUAL(CPLGetExtensionSafe(poOpenInfo->pszFilename).c_str(), "h5"))
+    if (!EQUAL(NisarGetExtension(poOpenInfo->pszFilename).c_str(), "h5"))
     {
         return FALSE;
     }
@@ -2304,7 +2314,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
              pszSubdatasetPath ? pszSubdatasetPath : "(none specified)");
 
     // Basic check: Does it have an .h5 extension? (Weak check)
-    if (!EQUAL(CPLGetExtensionSafe(pszActualFilename).c_str(), "h5"))
+    if (!EQUAL(NisarGetExtension(pszActualFilename).c_str(), "h5"))
     {
         return nullptr;
     }
@@ -3608,16 +3618,38 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 /* If no geotransform is found, return CE_None and set the transform to */
 /* an identity transform.                                               */
 /************************************************************************/
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 12)
 CPLErr NisarDataset::GetGeoTransform(GDALGeoTransform &oGT) const
 {
+#else
+CPLErr NisarDataset::GetGeoTransform(double *padfTransform)
+{
+    // Legacy Signature: create an temporary object to hold the result
+    GDALGeoTransform oGT;
+    // Initialize identity
+    oGT[0] = 0.0; oGT[1] = 1.0; oGT[2] = 0.0;
+    oGT[3] = 0.0; oGT[4] = 0.0; oGT[5] = 1.0;
+#endif
+
     // Check PAM (Persistent Aux Metadata) - Highest Priority
+    // We must handle the parent call differently because the parent signature 
+    // also changes between versions.
+#if GDAL_VERSION_MAJOR > 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR >= 12)
     if (GDALPamDataset::GetGeoTransform(oGT) == CE_None) return CE_None;
+#else
+    if (GDALPamDataset::GetGeoTransform(padfTransform) == CE_None) return CE_None;
+#endif
 
     // Check Internal Cache
     {
         std::lock_guard<std::mutex> lock(m_GeoTransformMutex);
         if (m_bGotGeoTransform) {
             memcpy(oGT.data(), m_adfGeoTransform, sizeof(double) * 6);
+            // LEGACY ADAPTER WRITE-BACK
+            #if GDAL_VERSION_MAJOR < 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR < 12)
+            if (padfTransform)
+                memcpy(padfTransform, oGT.data(), sizeof(double) * 6);
+            #endif
             return CE_None;
         }
     }
@@ -3634,6 +3666,11 @@ CPLErr NisarDataset::GetGeoTransform(GDALGeoTransform &oGT) const
         std::lock_guard<std::mutex> lock(m_GeoTransformMutex);
         m_bGotGeoTransform = true;
         memcpy(m_adfGeoTransform, oGT.data(), sizeof(double) * 6);
+        // LEGACY ADAPTER WRITE-BACK
+        #if GDAL_VERSION_MAJOR < 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR < 12)
+        if (padfTransform)
+            memcpy(padfTransform, oGT.data(), sizeof(double) * 6);
+        #endif
         return CE_None;
     }
 
@@ -3751,6 +3788,7 @@ CPLErr NisarDataset::GetGeoTransform(GDALGeoTransform &oGT) const
                         adfCalcGT[4] = 0.0;         // Rotation (0)
                         adfCalcGT[5] = resY;        // N-S Resolution
 
+
                         // Clean up HDF5 handles
                         H5Dclose(hX); 
                         H5Dclose(hY);
@@ -3765,6 +3803,12 @@ CPLErr NisarDataset::GetGeoTransform(GDALGeoTransform &oGT) const
 
                         CPLDebug("NISAR_DRIVER", "GetGeoTransform: Derived from coordinates. Origin=(%.2f, %.2f) Res=(%.6f, %.6f)",
                                  adfCalcGT[0], adfCalcGT[3], adfCalcGT[1], adfCalcGT[5]);
+
+                        // LEGACY ADAPTER WRITE-BACK
+                        #if GDAL_VERSION_MAJOR < 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR < 12)
+                        if (padfTransform)
+                           memcpy(padfTransform, oGT.data(), sizeof(double) * 6);
+                        #endif
 
                         return CE_None;
                     }

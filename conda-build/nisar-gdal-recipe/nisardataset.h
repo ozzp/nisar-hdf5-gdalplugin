@@ -15,6 +15,7 @@
 
 #include <string>
 #include <vector>
+#include <array>
 #include <map>
 #include <mutex>
 #include <cstring>  // For memcpy
@@ -28,6 +29,37 @@
 #include "gdal_pam.h"
 #include "gdal_priv.h"
 #include "gdal.h"  // Include GDAL header for CPLErr and error codes
+#include "gdal_version.h"
+
+class NisarRasterBand;
+
+// DEBUGGING: PRINT GDAL VERSION VALUES
+// This uses a helper macro to convert numbers to strings for printing
+#define STR_HELPER(x) #x
+#define STR(x) STR_HELPER(x)
+
+#ifdef GDAL_VERSION_NUM
+    #pragma message("-------------------------------------------------------")
+    #pragma message("DEBUG: GDAL_VERSION_NUM   = " STR(GDAL_VERSION_NUM))
+    #pragma message("DEBUG: GDAL_VERSION_MAJOR = " STR(GDAL_VERSION_MAJOR))
+    #pragma message("DEBUG: GDAL_VERSION_MINOR = " STR(GDAL_VERSION_MINOR))
+    #pragma message("-------------------------------------------------------")
+#else
+    #pragma message("-------------------------------------------------------")
+    #pragma message("ERROR: GDAL_VERSION_NUM is NOT defined!")
+    #pragma message("-------------------------------------------------------")
+#endif
+
+// Compatibility shim for GDAL < 3.12
+// GDALGeoTransform class was introduced in 3.12. Before that, it was just raw double[6].
+// We typedef it to std::array so .data() and operator[] work in this implementation.
+// We check Major/Minor directly to avoid macro expansion issues with GDAL_VERSION_NUM
+#if GDAL_VERSION_MAJOR < 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR < 12)
+    #pragma message ("-> ACTIVATING LEGACY TYPEDEF for GDALGeoTransform")
+    using GDALGeoTransform = std::array<double, 6>;
+#else
+    #pragma message ("-> SKIPPING LEGACY TYPEDEF (Assuming GDAL 3.12+ Native Class)")
+#endif
 
 /**************************************************************************/
 /* ====================================================================   */
@@ -39,9 +71,8 @@
 /* and managing subdatasets.                                              */
 /**************************************************************************/
 
-class NisarRasterBand;
 
-class NisarDataset : public GDALPamDataset
+class NisarDataset final : public GDALPamDataset
 {
     friend class NisarRasterBand;
 
@@ -99,7 +130,7 @@ class NisarDataset : public GDALPamDataset
     std::string ReadHDF5StringArrayAsList(hid_t hParentGroup, const char *pszDatasetName);
     std::string ReadHDF5StringDataset(hid_t hParentGroup, const char *pszDatasetName);
     static GDALDataType GetGDALDataType(hid_t hH5Type);
-    CPLErr GetGeoTransform_Logic(GDALGeoTransform &gt);
+
     CPLErr ReadGeoTransformAttribute(hid_t hObjectID, const char *pszAttrName,
                                      GDALGeoTransform &gt) const;
 
@@ -110,6 +141,13 @@ class NisarDataset : public GDALPamDataset
     static int Identify(GDALOpenInfo *poOpenInfo);
 
     static GDALDataset *Open(GDALOpenInfo *);
+
+#if GDAL_VERSION_MAJOR < 3 || (GDAL_VERSION_MAJOR == 3 && GDAL_VERSION_MINOR < 12)
+    // Legacy Signature
+    CPLErr GetGeoTransform( double * padfTransform ) override;
+#else
+    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
+#endif
 
     // Public Getters needed by NisarRasterBand (or using friend)
     hid_t GetHDF5Handle() const
@@ -125,8 +163,6 @@ class NisarDataset : public GDALPamDataset
     //virtual CPLErr GetRasterBand( int nBand, GDALRasterBand ** ppBand );
     char **GetMetadataDomainList() override;
     char **GetMetadata(const char *pszDomain = "") override;
-    //CPLErr GetGeoTransform( double * padfTransform ) override;
-    CPLErr GetGeoTransform(GDALGeoTransform &gt) const override;
     const OGRSpatialReference *GetSpatialRef() const override;
 
     //const OGRSpatialReference *GetSpatialRef() const override;

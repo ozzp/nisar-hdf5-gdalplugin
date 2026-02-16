@@ -16,6 +16,7 @@
 #include <mutex>
 #include "gdal_pam.h"
 #include "gdal_priv.h"
+#include "gdal_version.h"
 
 #include "hdf5.h"
 

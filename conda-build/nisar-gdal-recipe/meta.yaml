@@ -1,5 +1,5 @@
 {% set name = "gdal-driver-nisar" %}
-{% set version = "0.1.7" %} # This is the version of NISAR PLUGIN
+{% set version = "0.1.8" %} # This is the version of NISAR PLUGIN
 
 package:
   name: {{ name|lower }}
@@ -22,12 +22,14 @@ requirements:
 
   host:
     # Key dependencies to build against
-    - libgdal-core
+    - gdal {{ gdal }}
+    - libgdal-core {{ gdal }}
     - hdf5
 
   run:
     # Key dependencies to run with
     # same version that was used in the 'host' section.
+    - {{ pin_compatible('gdal', exact=True) }}
     - {{ pin_compatible('libgdal-core', exact=True) }}
     # Pin HDF5 to ensure the plugin uses the same HDF5 version it was compiled with
     - {{ pin_compatible('hdf5') }}
