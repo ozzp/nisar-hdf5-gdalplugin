@@ -35,20 +35,20 @@ class NisarRasterBand;
 
 // DEBUGGING: PRINT GDAL VERSION VALUES
 // This uses a helper macro to convert numbers to strings for printing
-#define STR_HELPER(x) #x
-#define STR(x) STR_HELPER(x)
+//#define STR_HELPER(x) #x
+//#define STR(x) STR_HELPER(x)
 
-#ifdef GDAL_VERSION_NUM
-    #pragma message("-------------------------------------------------------")
-    #pragma message("DEBUG: GDAL_VERSION_NUM   = " STR(GDAL_VERSION_NUM))
-    #pragma message("DEBUG: GDAL_VERSION_MAJOR = " STR(GDAL_VERSION_MAJOR))
-    #pragma message("DEBUG: GDAL_VERSION_MINOR = " STR(GDAL_VERSION_MINOR))
-    #pragma message("-------------------------------------------------------")
-#else
-    #pragma message("-------------------------------------------------------")
-    #pragma message("ERROR: GDAL_VERSION_NUM is NOT defined!")
-    #pragma message("-------------------------------------------------------")
-#endif
+//#ifdef GDAL_VERSION_NUM
+//    #pragma message("-------------------------------------------------------")
+//    #pragma message("DEBUG: GDAL_VERSION_NUM   = " STR(GDAL_VERSION_NUM))
+//    #pragma message("DEBUG: GDAL_VERSION_MAJOR = " STR(GDAL_VERSION_MAJOR))
+//    #pragma message("DEBUG: GDAL_VERSION_MINOR = " STR(GDAL_VERSION_MINOR))
+//    #pragma message("-------------------------------------------------------")
+//#else
+//    #pragma message("-------------------------------------------------------")
+//    #pragma message("ERROR: GDAL_VERSION_NUM is NOT defined!")
+//    #pragma message("-------------------------------------------------------")
+//#endif
 
 // Compatibility shim for GDAL < 3.12
 // GDALGeoTransform class was introduced in 3.12. Before that, it was just raw double[6].
