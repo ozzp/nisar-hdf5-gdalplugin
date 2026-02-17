@@ -6,6 +6,7 @@
 #include "cpl_conv.h"    // For CPLStrdup, CPLFree
 #include "cpl_error.h"
 #include "gdal_priv.h"
+#include "gdal_version.h"
 #include "gdal.h"  // For CE_Failure etc.
 
 #include <string>
