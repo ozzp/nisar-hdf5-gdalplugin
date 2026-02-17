@@ -3187,8 +3187,10 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
                     {
                         desc_val += "?] " + hdf5_path + " (Error opening)";
                     }
-                papszMetadataList = CSLSetNameValue(
-                papszMetadataList, desc_key.c_str(), desc_val.c_str());
+
+                    papszMetadataList = CSLSetNameValue(papszMetadataList, 
+                                                        desc_key.c_str(),
+                                                        desc_val.c_str());
                 }  // End loop
 
                  // Store the generated list in papszSubDatasets member
@@ -3374,14 +3376,44 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     // Use H5S_MAX_RANK for safety or allocate std::vector based on nDims
     hsize_t adims[H5S_MAX_RANK];
     H5Sget_simple_extent_dims(hDataspace, adims, nullptr);
+///////////////////////////////////
+    // --------------------------------------------------------------------
+    // Dimension Assignment & Band Logic
+    // --------------------------------------------------------------------
+    int nBandsToCreate = 1;
 
-    // Dimension Assignment
-    // Use indices based on rank, assuming HDF5 [..., Y, X] -> GDAL X=last, Y=second-last
-    poDS->nRasterXSize = static_cast<int>(adims[nDims - 1]);
-    poDS->nRasterYSize = static_cast<int>(adims[nDims - 2]);
-    H5Sclose(hDataspace);  // Close dataspace handle
+    if (nDims == 3)
+    {
+        // 3D Case: [Bands, Y, X]
+        // This handles the Radar Grid metadata cubes (e.g. 21 x 720 x 748)
+        nBandsToCreate     = static_cast<int>(adims[0]);
+        poDS->nRasterYSize = static_cast<int>(adims[1]);
+        poDS->nRasterXSize = static_cast<int>(adims[2]);
+        
+        CPLDebug("NISAR_DRIVER", "Detected 3D Dataset: %d Bands x %d Y x %d X", 
+                 nBandsToCreate, poDS->nRasterYSize, poDS->nRasterXSize);
+    }
+    else if (nDims == 2)
+    {
+        // Standard 2D Case: [Y, X]
+        nBandsToCreate     = 1;
+        poDS->nRasterYSize = static_cast<int>(adims[0]);
+        poDS->nRasterXSize = static_cast<int>(adims[1]);
+    }
+    else
+    {
+        // Fallback for > 3 dimensions (Take last two as spatial)
+        // Or you can return an error here if you want to be strict.
+        nBandsToCreate     = 1; 
+        poDS->nRasterYSize = static_cast<int>(adims[nDims - 2]);
+        poDS->nRasterXSize = static_cast<int>(adims[nDims - 1]);
+        
+        CPLDebug("NISAR_DRIVER", "Rank %d detected. Treating as 2D using last two dimensions.", nDims);
+    }
 
-    // Sanity check dimensions
+    H5Sclose(hDataspace); // Close handle
+    
+    // Sanity Checks
     if (poDS->nRasterXSize <= 0 || poDS->nRasterYSize <= 0)
     {
         CPLError(CE_Failure, CPLE_AppDefined,
@@ -3390,9 +3422,17 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         delete poDS;
         return nullptr;
     }
-    CPLDebug("NISAR_DRIVER", "Dataset Dimensions: %d x %d", poDS->nRasterXSize,
-             poDS->nRasterYSize);
 
+    CPLDebug("NISAR_DRIVER", "Dataset Dimensions: %d x %d (Bands: %d)", 
+             poDS->nRasterXSize, poDS->nRasterYSize, nBandsToCreate);
+
+    // Create Bands
+    for (int i = 0; i < nBandsToCreate; i++)
+    {
+        // GDAL Band indices are 1-based (1, 2, 3...)
+        poDS->SetBand(i + 1, new NisarRasterBand(poDS, i + 1));
+    }
+////////////////////////////////////////
     if (poDS->m_bIsLevel2)
     {
         CPLDebug("NISAR_DRIVER", "Level 2 product detected. Georeferencing "
@@ -3419,44 +3459,50 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
  	        "Unknown NISAR product structure. Georeferencing may be absent.");
     }
 
-    // Determine Band Count
-    if (GDALDataTypeIsComplex(poDS->eDataType))
+    // Band Creation Check
+    // We only run this legacy logic if bands haven't been created yet.
+    // (The 3D/2D logic earlier in this function should have already called SetBand)
+    if (poDS->nBands == 0)
     {
-        poDS->nBands = 1;  // Convention: Represent complex as one GDAL band
-        CPLDebug("NISAR_DRIVER",
-                 "Data type is complex, setting Band Count to: %d (single "
-                 "complex band convention)",
-                 poDS->nBands);
-    }
-    else
-    {
-        poDS->nBands = 1;  // Default for non-complex types
-        CPLDebug("NISAR_DRIVER",
-                 "Data type is not complex, setting Band Count to: %d",
-                 poDS->nBands);
-    }
-
-    // Note: Further logic may be needed for other multi-component datasets if supported later.
-
-    // Create raster bands
-    for (int i = 1; i <= poDS->nBands; i++)
-    {
-        NisarRasterBand *poBand = nullptr;
-        try
+        // Determine Band Count 
+        if (GDALDataTypeIsComplex(poDS->eDataType))
         {
-            // Create the band object - Constructor will handle its own setup now
-            poBand = new NisarRasterBand(poDS, i);
+            poDS->nBands = 1;  // Convention: Represent complex as one GDAL band
+            CPLDebug("NISAR_DRIVER",
+                     "Data type is complex, setting Band Count to: %d (single "
+                     "complex band convention)",
+                     poDS->nBands);
         }
-        catch (const std::bad_alloc &)
+        else
         {
-            CPLError(CE_Failure, CPLE_OutOfMemory,
-                     "Failed to allocate NisarRasterBand object for band %d.",
-                     i);
-            delete poDS;
-            return nullptr;
+            poDS->nBands = 1;  // Default for non-complex types
+            CPLDebug("NISAR_DRIVER",
+                     "Data type is not complex, setting Band Count to: %d",
+                     poDS->nBands);
         }
 
-        poDS->SetBand(i, poBand);  // Add band to dataset (poDS takes ownership)
+        // Note: Further logic may be needed for other multi-component datasets if supported later.
+
+        // Create raster bands
+        for (int i = 1; i <= poDS->nBands; i++)
+        {
+            NisarRasterBand *poBand = nullptr;
+            try
+            {
+                // Create the band object
+                poBand = new NisarRasterBand(poDS, i);
+            }
+            catch (const std::bad_alloc &)
+            {
+                CPLError(CE_Failure, CPLE_OutOfMemory,
+                         "Failed to allocate NisarRasterBand object for band %d.",
+                         i);
+                delete poDS;
+                return nullptr;
+            }
+
+            poDS->SetBand(i, poBand);  // Add band to dataset (poDS takes ownership)
+        }
     }
 
     // Final Setup
@@ -3692,8 +3738,9 @@ CPLErr NisarDataset::GetGeoTransform(double *padfTransform)
         // Safety Check: Only scan for coordinates if we are in a known grid-like hierarchy
         bool bIsStandardGrid = (sCurrentPath.find("/grids/") != std::string::npos);
         bool bIsCalibrationGrid = (sCurrentPath.find("/calibrationInformation/") != std::string::npos);
+        bool bIsRadarGrid       = (sCurrentPath.find("/radarGrid/") != std::string::npos);
 
-        if (bIsStandardGrid || bIsCalibrationGrid)
+        if (bIsStandardGrid || bIsCalibrationGrid || bIsRadarGrid)
         {
             std::string sCoordsRoot;
             std::string sSearchPath = sCurrentPath;

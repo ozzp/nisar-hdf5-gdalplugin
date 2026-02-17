@@ -319,9 +319,21 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     file_start[rank - 1] = start_offset_x;
     file_count[rank - 2] = nActualBlockYSize;
     file_count[rank - 1] = nActualBlockXSize;
-    for (int i = 0; i < rank - 2; ++i) { // Handle higher dimensions
-        file_start[i] = 0;
-        file_count[i] = 1;
+
+    if (rank == 3)
+    {
+        // 3D Case: [Band][Y][X]
+        // GDAL Band indices are 1-based, HDF5 is 0-based.
+        file_start[0] = static_cast<hsize_t>(this->nBand - 1);
+        file_count[0] = 1;
+    }
+    else
+    {
+        // Fallback for > 3 dimensions or 2D
+        for (int i = 0; i < rank - 2; ++i) {
+            file_start[i] = 0;
+            file_count[i] = 1;
+        }
     }
 
     herr_t status = H5Sselect_hyperslab(m_hFileSpaceID, H5S_SELECT_SET, file_start.data(),
