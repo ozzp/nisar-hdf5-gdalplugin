@@ -1,3 +1,13 @@
 # recipe/conda_build_config.yaml
+
 gdal:
-  - "3.12.2"
+  - "3.12"
+
+python:
+  - "3.12"
+
+c_compiler_version:
+  - "12"
+
+cxx_compiler_version:
+  - "12"
