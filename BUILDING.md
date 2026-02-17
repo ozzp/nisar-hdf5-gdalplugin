@@ -215,7 +215,7 @@ Building for `linux-64` on a Mac requires using Docker.
     docker run --platform linux/amd64 --rm -it -v "$(pwd)":/build_space conda-builder
 
     # Once inside the container's shell, run the build
-    conda build . --output-folder /build_space/conda-bld
+    conda build nisar-gdal-recipe -m nisar-gdal-recipe/conda_build_config.yaml --output-folder /build_space/conda-bld/
     ```
 
 3.  **Exit the container** by typing `exit`.
