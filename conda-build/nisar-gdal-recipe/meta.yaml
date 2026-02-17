@@ -29,10 +29,10 @@ requirements:
   run:
     # Key dependencies to run with
     # same version that was used in the 'host' section.
-    - {{ pin_compatible('gdal', exact=True) }}
-    - {{ pin_compatible('libgdal-core', exact=True) }}
+    - {{ pin_compatible('gdal', max_pin='x.x') }}
+    - {{ pin_compatible('libgdal-core', max_pin='x.x') }}
     # Pin HDF5 to ensure the plugin uses the same HDF5 version it was compiled with
-    - {{ pin_compatible('hdf5') }}
+    - {{ pin_compatible('hdf5', max_pin='x.x') }}
 test:
   # Add this section to install a full GDAL environment for testing.
   requirements:
