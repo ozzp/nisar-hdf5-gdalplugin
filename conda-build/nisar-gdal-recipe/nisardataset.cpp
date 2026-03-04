@@ -1982,9 +1982,17 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
             callback_data.pszPrefix = "";  // Use an empty prefix for the root
             H5Aiterate2(this->hHDF5, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
                         NISAR_AttributeCallback, &callback_data);
+
             // For a container, m_sInst might not be set.
             // We must find the correct identification group.
             std::string sIdentPath;
+
+            // Suppress errors for these existence checks
+            H5E_auto2_t old_func;
+            void *old_client_data;
+            H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+            H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
             if (H5Lexists(this->hHDF5, "/science/LSAR/identification", H5P_DEFAULT) > 0)
             {
                 sIdentPath = "/science/LSAR/identification";
@@ -1993,6 +2001,9 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
             {
                 sIdentPath = "/science/SSAR/identification";
             }
+
+            // Restore errors
+            H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
 
             if (!sIdentPath.empty())
             {
