@@ -39,6 +39,7 @@ void GDALRegister_NISAR()
     GDALDriver *poDriver = new GDALDriver();
 
     poDriver->SetDescription( "NISAR" );
+    poDriver->SetMetadataItem( "DRIVER_VERSION", "v0.1.9 (Build Date: " __DATE__ " " __TIME__ ")" );
     poDriver->SetMetadataItem( GDAL_DCAP_RASTER, "YES" );
     poDriver->SetMetadataItem( GDAL_DMD_LONGNAME,
                                "NISAR HDF5" );
