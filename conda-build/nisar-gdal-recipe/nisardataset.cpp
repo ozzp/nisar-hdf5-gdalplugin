@@ -3443,6 +3443,55 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         // GDAL Band indices are 1-based (1, 2, 3...)
         poDS->SetBand(i + 1, new NisarRasterBand(poDS, i + 1));
     }
+
+    // Assign Z-dimension values (Heights) to Bands
+    if (nDims == 3 && poDS->hDataset >= 0)
+    {
+        std::string sCurrentPath = pathToOpen;
+        size_t nLastSlash = sCurrentPath.find_last_of('/');
+        if (nLastSlash != std::string::npos)
+        {
+            std::string sParentGroup = sCurrentPath.substr(0, nLastSlash);
+            std::string sZAxisPath = sParentGroup + "/heightAboveEllipsoid";
+
+            // Suppress HDF5 errors during the probe
+            H5E_auto2_t old_func; void *old_client_data;
+            H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+            H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+            htri_t bHasHeight = H5Lexists(poDS->hHDF5, sZAxisPath.c_str(), H5P_DEFAULT);
+
+            H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore
+
+            if (bHasHeight > 0)
+            {
+                std::vector<double> adfHeights;
+                if (Read1DDoubleVec(poDS->hHDF5, sZAxisPath.c_str(), adfHeights))
+                {
+                    if (adfHeights.size() == static_cast<size_t>(nBandsToCreate))
+                    {
+                        for (int i = 0; i < nBandsToCreate; i++)
+                        {
+                            GDALRasterBand *poBand = poDS->GetRasterBand(i + 1);
+                            if (poBand)
+                            {
+                                // Set a clean description for gdalinfo
+                                poBand->SetDescription(CPLSPrintf("Height: %.1f m", adfHeights[i]));
+                                // Set a formal metadata item for programmatic access
+                                poBand->SetMetadataItem("HEIGHT_METERS", CPLSPrintf("%.1f", adfHeights[i]));
+                            }
+                        }
+                        CPLDebug("NISAR_DRIVER", "Assigned heightAboveEllipsoid values to %d bands.", nBandsToCreate);
+                    }
+                    else
+                    {
+                        CPLDebug("NISAR_DRIVER", "Height array size (%zu) does not match band count (%d).", 
+                                 adfHeights.size(), nBandsToCreate);
+                    }
+                }
+            }
+        }
+    }
 ////////////////////////////////////////
     if (poDS->m_bIsLevel2)
     {
