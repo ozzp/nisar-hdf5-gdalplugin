@@ -1865,6 +1865,16 @@ char **NisarDataset::GetMetadata(const char *pszDomain)
         // Case 2: Level 2 Product (no GCPs, has a raster dataset open)
         else if (this->hDataset >= 0)
         {
+            // Hoist 3D Dataset Attributes to GDAL Dataset
+            NISAR_AttrCallbackData dset_attr_cb_data;
+            dset_attr_cb_data.ppapszList = &papszHDFMetadata;
+            dset_attr_cb_data.pszPrefix = ""; // No prefix, attach directly to root
+            hsize_t attr_idx = 0;
+            
+            // Read attributes like 'description', 'units', '_FillValue' from the dataset
+            H5Aiterate2(this->hDataset, H5_INDEX_NAME, H5_ITER_NATIVE, &attr_idx,
+                        NISAR_AttributeCallback, &dset_attr_cb_data);
+
             std::string datasetPath = get_hdf5_object_name(this->hDataset);
 
             // Determine the parent group path (e.g., /science/LSAR/GCOV/grids/frequencyA/ or /science/LSAR/GUNW/.../HH/)
@@ -3437,12 +3447,34 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     CPLDebug("NISAR_DRIVER", "Dataset Dimensions: %d x %d (Bands: %d)", 
              poDS->nRasterXSize, poDS->nRasterYSize, nBandsToCreate);
 
+    double dfNoData = 0.0;
+    bool bHasNoData = false;
+    
+    // Check if _FillValue attribute exists on the 3D dataset
+    H5E_auto2_t old_func_fill; void *old_client_data_fill;
+    H5Eget_auto2(H5E_DEFAULT, &old_func_fill, &old_client_data_fill);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+    
+    hid_t hFillAttr = H5Aopen(poDS->hDataset, "_FillValue", H5P_DEFAULT);
+    if (hFillAttr >= 0) {
+        if (H5Aread(hFillAttr, H5T_NATIVE_DOUBLE, &dfNoData) >= 0) {
+            bHasNoData = true;
+        }
+        H5Aclose(hFillAttr);
+    }
+    H5Eset_auto2(H5E_DEFAULT, old_func_fill, old_client_data_fill);
+
     // Create Bands
     for (int i = 0; i < nBandsToCreate; i++)
     {
         // GDAL Band indices are 1-based (1, 2, 3...)
         poDS->SetBand(i + 1, new NisarRasterBand(poDS, i + 1));
     }
+        // Apply the NoData value to each band
+        if (bHasNoData) {
+            poBand->SetNoDataValue(dfNoData);
+        }
+
 
     // Assign Z-dimension values (Heights) to Bands
     if (nDims == 3 && poDS->hDataset >= 0)
@@ -3492,7 +3524,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
             }
         }
     }
-////////////////////////////////////////
+
     if (poDS->m_bIsLevel2)
     {
         CPLDebug("NISAR_DRIVER", "Level 2 product detected. Georeferencing "
