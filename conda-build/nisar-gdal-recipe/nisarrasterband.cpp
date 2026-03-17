@@ -32,8 +32,7 @@
 /************************************************************************/
 NisarRasterBand::NisarRasterBand( NisarDataset *poDSIn, int nBandIn ) :
       GDALPamRasterBand(),  //Call base class construction
-      hH5Type(-1),          //Initialize custom member
-      m_bMetadataRead(false)// <<< Initialize metadata flag
+      hH5Type(-1)           //Initialize custom member
 {
     this->poDS = poDSIn;
     this->nBand = nBandIn;
@@ -216,58 +215,6 @@ GDALRasterBand* NisarRasterBand::GetMaskBand()
     return m_poMaskBand;
 }
 
-// NisarRasterBand::GetMetadata
-char **NisarRasterBand::GetMetadata( const char *pszDomain )
-{
-    // First, let the PAM system load any existing metadata from .aux.xml
-    GDALPamRasterBand::GetMetadata(pszDomain);
-
-    // Handle non-default domains using only the PAM system
-    if (pszDomain != nullptr && !EQUAL(pszDomain, "")) {
-        return GDALPamRasterBand::GetMetadata(pszDomain);
-    }
-
-    // Handle the default domain with caching
-    std::lock_guard<std::mutex> lock(m_MetadataMutex);
-
-    // If we've already read the HDF5 attributes, just return what PAM has.
-    if (m_bMetadataRead) {
-        return GDALPamRasterBand::GetMetadata(pszDomain);
-    }
-    m_bMetadataRead = true; // Mark as read for this session
-
-    CPLDebug("NISAR_Band", "Band %d: Reading HDF5 attributes for default metadata domain.", nBand);
-
-    NisarDataset *poGDS = reinterpret_cast<NisarDataset *>( this->poDS );
-    hid_t hDatasetID = poGDS ? poGDS->GetDatasetHandle() : -1;
-
-    if (hDatasetID >= 0) {
-        char **papszHDFMeta = nullptr;
-        NISAR_AttrCallbackData callback_data;
-        callback_data.ppapszList = &papszHDFMeta;
-        
-        // Band attributes are local and shouldn't have the full path.
-        callback_data.pszPrefix = ""; 
-	// Get the full HDF5 path of this band's dataset to use as a prefix.
-        //std::string datasetPath = get_hdf5_object_name(hDatasetID);
-        //callback_data.pszPrefix = datasetPath.c_str();
-
-        hsize_t idx = 0;
-        H5Aiterate2(hDatasetID, H5_INDEX_NAME, H5_ITER_NATIVE, &idx,
-                    NISAR_AttributeCallback, &callback_data);
-
-        if (papszHDFMeta != nullptr) {
-            // Merge the HDF5 attributes into this band's metadata list
-            SetMetadata(papszHDFMeta);
-            CSLDestroy(papszHDFMeta);
-        }
-    } else {
-        CPLError(CE_Warning, CPLE_AppDefined, "Band %d: Cannot read HDF5 metadata, dataset handle invalid.", nBand);
-    }
-
-    // Return the final merged list from this band's PAM store
-    return GDALPamRasterBand::GetMetadata(pszDomain);
-}
 /***************************************************************************/
 /*                             IReadBlock()                                */
 /* This method reads a block of data from the HDF5 dataset.                */
@@ -383,19 +330,6 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     }
 
     return CE_None;
-}
-/************************************************************************/
-/*                           GetNoDataValue()                           */
-/* This method retrieves the NoData value from the HDF5 metadata if available.*/
-/************************************************************************/
-
-double NisarRasterBand::GetNoDataValue( int *pbSuccess )
-{
-    // TODO: Retrieve NoData value from HDF5 metadata if available
-    if( pbSuccess )
-        *pbSuccess = FALSE;
-
-    return 0.0;
 }
 
 // ====================================================================

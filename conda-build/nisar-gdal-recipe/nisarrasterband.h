@@ -42,13 +42,6 @@ class NisarRasterBand final : public GDALPamRasterBand
     hid_t m_hFileSpaceID = -1;  // Cached filespace for the HDF5 dataset
     hid_t m_hMemSpaceID = -1;   // Cached memory space for a full block
 
-    // Metadata caching members for this band
-    mutable char **m_papszMetadata =
-        nullptr;  // Cached merged metadata (includes HDF5 attrs)
-    mutable bool m_bMetadataRead =
-        false;  // Flag: Have we read HDF5 attrs for default domain?
-    mutable std::mutex m_MetadataMutex;  // Mutex for metadata access
-
     NisarHDF5MaskBand* m_poMaskBand = nullptr; // Cache the mask band
     bool m_bMaskBandOwned = false;
 
@@ -59,9 +52,6 @@ class NisarRasterBand final : public GDALPamRasterBand
     virtual ~NisarRasterBand() override;
     virtual CPLErr IReadBlock(int nBlockXOff, int nBlockYOff,
                               void *pImage) override;
-    double GetNoDataValue(int *pbSuccess = nullptr) override;
-    // Add Metadata override
-    char **GetMetadata(const char *pszDomain = "") override;
 
     virtual GDALRasterBand* GetMaskBand() override;
     virtual int GetMaskFlags() override;
