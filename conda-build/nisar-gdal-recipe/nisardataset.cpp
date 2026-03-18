@@ -3470,12 +3470,12 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         // GDAL Band indices are 1-based (1, 2, 3...)
 	    NisarRasterBand* poBand = new NisarRasterBand(poDS, i + 1);
         poDS->SetBand(i + 1, poBand);
-    }
-        // Apply the NoData value to each band
+		
+		// Apply the NoData value to each band
         if (bHasNoData) {
             poBand->SetNoDataValue(dfNoData);
         }
-
+    }
 
     // Assign Z-dimension values (Heights) to Bands
     if (nDims == 3 && poDS->hDataset >= 0)
