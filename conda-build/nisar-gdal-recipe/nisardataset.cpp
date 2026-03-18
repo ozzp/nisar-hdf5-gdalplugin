@@ -3468,7 +3468,8 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     for (int i = 0; i < nBandsToCreate; i++)
     {
         // GDAL Band indices are 1-based (1, 2, 3...)
-        poDS->SetBand(i + 1, new NisarRasterBand(poDS, i + 1));
+	    NisarRasterBand* poBand = new NisarRasterBand(poDS, i + 1);
+        poDS->SetBand(i + 1, poBand);
     }
         // Apply the NoData value to each band
         if (bHasNoData) {
