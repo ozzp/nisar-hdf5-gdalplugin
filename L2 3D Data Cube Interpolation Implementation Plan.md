@@ -123,7 +123,7 @@ CPLErr NisarInterpolatedRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, v
 
 ### User CLI
 `gdal_translate -oo DEM_FILE=dem.vrt -oo QUANTITY=LookAngle ...` NISAR:nisar_l2_product.h5
-    - Driver reads the coarse `LookAngle` cube and X/Y/Z axes into RAM.
+    - Driver reads the coarse `LookAngle` cube and X/Y/Z axes into memory.
     - Driver opens `dem.vrt` and wraps it in a GDAL Warped VRT so its pixels perfectly align with the target SAR grid.
     - GDAL begins looping through the file, reading in blocks (say 512x512).
     - For each block, `IReadBlock()` fetches 512x512 heights from the Aligned DEM, loops over the 262,144 pixels, runs the interpolation math against the coarse cube, and hands the calculated block back to GDAL to be written to the GeoTIFF.
