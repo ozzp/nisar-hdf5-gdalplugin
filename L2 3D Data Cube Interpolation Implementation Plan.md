@@ -1,4 +1,6 @@
 Implemention Plan for 3D data cube interpolation.  Borrowing from get_product_geometry_from_cubes.py
+EPSG4326.vrt: Copernicus 30-m EPSG:4326(GLO-30)DEM with extent -180 to 180, -90 to 90
+Optimize for DEM provided as AWS s3 object in VRT format with leaf nodes being COG files internally tiled with Block=512x512
 
 
 ### Declare the Open Options
