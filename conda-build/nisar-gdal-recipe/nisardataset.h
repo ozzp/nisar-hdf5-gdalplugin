@@ -106,12 +106,13 @@ class NisarDataset final : public GDALPamDataset
     std::string m_sProductType; // e.g., "GSLC", "RSLC"
     bool m_bIsLevel1 = false;
     bool m_bIsLevel2 = false;
+    bool m_bIsLevel3 = false;
 
     // Open options used
     std::string m_sInst; // LSAR or SSAR
     std::string m_sFreq; // A or B
     std::string m_sPol;  // HH, HV, etc.
-    bool m_bMaskEnabled = true; //Default to YES
+    bool m_bMaskEnabled = false; //Default to NO
 
   private:  // Keep static helpers private if only used internally
     struct MetadataCategory {
@@ -169,5 +170,4 @@ class NisarDataset final : public GDALPamDataset
     CPLErr GenerateGCPsFromGeolocationGrid(const char *pszProductGroup);
     char **GetFileList() override;
 };
-
 #endif  //NISAR_DATASET_H
