@@ -369,46 +369,57 @@ NisarHDF5MaskBand::~NisarHDF5MaskBand()
         H5Dclose(m_hMaskDS);
     }
 }
-
 CPLErr NisarHDF5MaskBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 {
+    // Pre-fill the GDAL buffer with 0 (Invalid) to handle partial block padding
+    int nFullBlockPixels = nBlockXSize * nBlockYSize;
+    memset(pImage, 0, nFullBlockPixels);
+
     // Calculate offsets for HDF5 Hyperslab
-    hsize_t offset[2] = { 
-        static_cast<hsize_t>(nBlockYOff) * nBlockYSize, 
-        static_cast<hsize_t>(nBlockXOff) * nBlockXSize 
+    hsize_t offset[2] = {
+        static_cast<hsize_t>(nBlockYOff) * nBlockYSize,
+        static_cast<hsize_t>(nBlockXOff) * nBlockXSize
     };
-    
+
     // Handle edge blocks
     int nRequestX = nBlockXSize;
     int nRequestY = nBlockYSize;
+
     if (offset[0] + nRequestY > static_cast<hsize_t>(nRasterYSize))
         nRequestY = nRasterYSize - offset[0];
     if (offset[1] + nRequestX > static_cast<hsize_t>(nRasterXSize))
         nRequestX = nRasterXSize - offset[1];
 
     hsize_t count[2] = { static_cast<hsize_t>(nRequestY), static_cast<hsize_t>(nRequestX) };
-    
-    // Read Raw Data
-    hid_t hMemSpace = H5Screate_simple(2, count, nullptr);
+
+    // Create a memory space matching GDAL's full block dimensions
+    hsize_t mem_dims[2] = { static_cast<hsize_t>(nBlockYSize), static_cast<hsize_t>(nBlockXSize) };
+    hid_t hMemSpace = H5Screate_simple(2, mem_dims, nullptr);
+
+    // If it's a partial block, select a hyperslab in the memory space
+    if (nRequestX < nBlockXSize || nRequestY < nBlockYSize) {
+        hsize_t mem_start[2] = {0, 0};
+        H5Sselect_hyperslab(hMemSpace, H5S_SELECT_SET, mem_start, nullptr, count, nullptr);
+    }
+
     hid_t hFileSpace = H5Dget_space(m_hMaskDS);
     H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
 
     // Read into the buffer provided by GDAL
     GByte* pbyBuffer = static_cast<GByte*>(pImage);
-    
+
     herr_t status = H5Dread(m_hMaskDS, H5T_NATIVE_UINT8, hMemSpace, hFileSpace, H5P_DEFAULT, pbyBuffer);
-    
+
     H5Sclose(hFileSpace);
     H5Sclose(hMemSpace);
 
     if (status < 0) return CE_Failure;
 
-    int nPixels = nRequestX * nRequestY;
-    
-    // EXTENSIBLE VALIDITY LOGIC
+    // Iterate over the FULL block, not just nPixels. 
+    // This ensures padded pixels (which are 0) safely pass through the logic as Invalid.
     if (m_eType == NisarMaskType::GCOV)
     {
-        for(int i = 0; i < nPixels; i++) {
+        for(int i = 0; i < nFullBlockPixels; i++) {
             GByte v = pbyBuffer[i];
             // GCOV/GSLC: 1-5 is Valid. 0 is Invalid. 255 is Fill.
             // GDAL Standard: 255=Valid, 0=Invalid
@@ -417,19 +428,14 @@ CPLErr NisarHDF5MaskBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImag
     }
     else if (m_eType == NisarMaskType::GUNW)
     {
-        for(int i = 0; i < nPixels; i++) {
+        for(int i = 0; i < nFullBlockPixels; i++) {
             GByte v = pbyBuffer[i];
-            
-            if (v == 255) {
-                pbyBuffer[i] = 0; // Fill is Invalid
+
+            if (v == 255 || v == 0) {
+                pbyBuffer[i] = 0; // Fill or missing is Invalid
             } else {
-                // Parse 3-digit decimal: Water|RefSub|SecSub
-                // Example: 123 -> Water=1, Ref=2, Sec=3
-                // Valid if BOTH subswaths are non-zero.
                 int nRefSubswath = (v / 10) % 10;
                 int nSecSubswath = v % 10;
-                
-                // GDAL Mask: 255=Valid, 0=Invalid
                 pbyBuffer[i] = (nRefSubswath > 0 && nSecSubswath > 0) ? 255 : 0;
             }
         }

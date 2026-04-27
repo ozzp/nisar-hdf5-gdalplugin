@@ -39,13 +39,27 @@ void GDALRegister_NISAR()
     GDALDriver *poDriver = new GDALDriver();
 
     poDriver->SetDescription( "NISAR" );
-    poDriver->SetMetadataItem( "DRIVER_VERSION", "v0.1.9 (Build Date: " __DATE__ " " __TIME__ ")" );
+    poDriver->SetMetadataItem( "DRIVER_VERSION", "v0.2.1 (Build Date: " __DATE__ " " __TIME__ ")" );
     poDriver->SetMetadataItem( GDAL_DCAP_RASTER, "YES" );
     poDriver->SetMetadataItem( GDAL_DMD_LONGNAME,
                                "NISAR HDF5" );
     poDriver->SetMetadataItem( GDAL_DMD_HELPTOPIC,
                                "drivers/raster/nisar.html" );
     poDriver->SetMetadataItem( GDAL_DMD_EXTENSION, "h5" );
+    poDriver->SetMetadataItem(
+                               GDAL_DMD_OPENOPTIONLIST,
+                               "<OpenOptionList>"
+                               "  <Option name='METADATA' type='string' description='Filter specific metadata domains to load (e.g., RADARGRID, ALL)'/>"
+                               "  <Option name='DEM_FILE' type='string' description='Path to DEM (VRT or raster) for 3D cube interpolation'/>"
+                               "  <Option name='DEM_RESAMPLING' type='string-select' description='DEM interpolation method' default='CUBICSPLINE'>"
+                               "    <Value>NEAREST</Value>"
+                               "    <Value>BILINEAR</Value>"
+                               "    <Value>CUBIC</Value>"
+                               "    <Value>CUBICSPLINE</Value>"
+                               "  </Option>"
+                               "  <Option name='QUANTITY' type='string' description='Quantity to interpolate (e.g., LookAngle, IncidenceAngle)'/>"
+                               "  <Option name='MASK' type='boolean' description='Apply valid data mask (default NO)'/>"
+                               "</OpenOptionList>");
 
     poDriver->pfnOpen = NisarDataset::Open;
 
