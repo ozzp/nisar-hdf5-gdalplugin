@@ -2560,10 +2560,18 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     // Calculate and set optimized page buffer size on Pass 2 FAPL
     if (actual_page_size > 0 && fapl_id_pass2 != H5P_DEFAULT)
     {
-        size_t target_buffer_bytes = 16 * 1024 * 1024; // Target 16 MB
-        unsigned int num_pages_in_buffer = (target_buffer_bytes + actual_page_size - 1) / actual_page_size;
-        if (num_pages_in_buffer == 0) num_pages_in_buffer = 1;
-        size_t page_buffer_bytes = num_pages_in_buffer * actual_page_size; // Exact multiple
+        // Get the requested buffer size from GDAL Config Options (Default to 16MB if not set)
+        const char* pszPageBufSize = CPLGetConfigOption("H5_PAGE_BUFFER_SIZE", "16777216");
+        size_t target_buffer_bytes = static_cast<size_t>(CPLAtoGIntBig(pszPageBufSize));
+
+        // Ensure it's at least one page
+        if (target_buffer_bytes < actual_page_size) target_buffer_bytes = actual_page_size;
+
+        // Calculate how many pages fit in that target
+        unsigned int num_pages_in_buffer = target_buffer_bytes / actual_page_size;
+
+        // Round to exact multiple of actual_page_size
+        size_t page_buffer_bytes = num_pages_in_buffer * actual_page_size;
         
         CPLDebug("NISAR_DRIVER", "Setting OPTIMIZED HDF5 page buffer: %u pages, Total=%lu bytes.",
                  num_pages_in_buffer, (unsigned long)page_buffer_bytes);
@@ -3006,8 +3014,8 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
             CPLScanLong(CPLGetConfigOption("NISAR_CHUNK_CACHE_SIZE_MB", "512"),
                         512);  // Read from config option
         size_t new_nbytes = new_cache_size_mb * 1024 * 1024;
-        size_t new_nslots = std::max(
-            (size_t)10009, rdcc_nslots * 4);  // Heuristic, prime num often good
+        //size_t new_nslots = std::max((size_t)10009, rdcc_nslots * 4);  // Heuristic, prime num often good
+        size_t new_nslots = (size_t)CPLScanLong(CPLGetConfigOption("NISAR_CHUNK_CACHE_SLOTS", "524287"), 524287);
         herr_t cache_status =
             H5Pset_chunk_cache(dapl_id, new_nslots, new_nbytes, rdcc_w0);
         if (cache_status < 0)
