@@ -206,12 +206,6 @@ This will force the compiler to use only the headers and libraries within the co
 
 -----
 
-This looks sharp and technically sound! You’ve successfully navigated the "architecture gymnastics" of building Linux packages on a Mac. 
-
-I’ve applied a final **"Professional Polish"** to the formatting to ensure that comments don't bleed into your commands and that the distinction between the two builds is crystal clear for anyone else who might use this guide.
-
----
-
 ## Building for Linux x86_64/arm64 (Cross-Platform)
 
 Building for `linux-64` and `linux-aarch64` (Graviton) on a Mac requires using Docker to provide a native Linux environment.
