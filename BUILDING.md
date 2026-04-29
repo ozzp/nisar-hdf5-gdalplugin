@@ -97,31 +97,27 @@ make install
 
 ### `Dockerfile`
 
-This file is used to create the Linux build environment.
+This file is used to create the arm64 and x86_64 build environment.
 
-```dockerfile
-# Use AlmaLinux as the base image
+# Use AlmaLinux as the base image (Alma natively supports multi-arch)
 FROM almalinux:latest
 
-# Set metadata for the image
+# Set metadata
 LABEL maintainer="Your Name <you@example.com>"
-LABEL description="Docker image for building linux-64 conda packages with Miniconda."
+LABEL description="Multi-arch Docker image for NISAR GDAL driver building (x86_64/arm64)"
+
+# ARG TARGETARCH is provided by Docker Buildx automatically
+ARG TARGETARCH
 
 # Set environment variables
-ENV LANG="C.UTF-8"
-ENV LC_ALL="C.UTF-8"
-ENV PATH="/opt/conda/bin:$PATH"
+ENV LANG="C.UTF-8" \
+    LC_ALL="C.UTF-8" \
+    PATH="/opt/conda/bin:$PATH" \
+    GDAL_DRIVER_PATH="/opt/conda/lib/gdalplugins" \
+    GDAL_PAM_ENABLED=NO \
+    PROJ_LIB="/opt/conda/share/proj"
 
-# Explicitly tell GDAL where to find custom driver plugins
-ENV GDAL_DRIVER_PATH="/opt/conda/lib/gdalplugins"
-
-# As we build read-only gdal driver
-ENV GDAL_PAM_ENABLED=NO
-
-# Explicitly tell the PROJ library where to find its data files (proj.db)
-ENV PROJ_LIB="/opt/conda/share/proj"
-
-# Install system dependencies, including glibc for QEMU emulation
+# 1. Install system dependencies
 RUN dnf update -y && \
     dnf install -y \
       glibc \
@@ -130,41 +126,55 @@ RUN dnf update -y && \
       bzip2 \
       make \
       gcc-c++ \
-      git && \
+      git \
+      tar && \
     dnf clean all && \
     rm -rf /var/cache/dnf/*
 
-# Download and install the AWS CLI v2
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+# 2. Download and install the AWS CLI v2 (Architecture-aware)
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        ARCH_NAME="aarch64"; \
+    else \
+        ARCH_NAME="x86_64"; \
+    fi && \
+    curl "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH_NAME}.zip" -o "awscliv2.zip" && \
     unzip awscliv2.zip && \
     ./aws/install && \
     rm -rf awscliv2.zip aws
 
-# Verify the installation
-RUN aws --version
-
-# Install a specific version of Miniconda with Python 3.11
-RUN wget "https://repo.anaconda.com/miniconda/Miniconda3-py311_24.5.0-0-Linux-x86_64.sh" -O ~/miniconda.sh && \
+# 3. Install Miniconda (Architecture-aware)
+# We use the aarch64 installer for arm64 and x86_64 for Intel
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        CONDA_ARCH="aarch64"; \
+    else \
+        CONDA_ARCH="x86_64"; \
+    fi && \
+    wget "https://repo.anaconda.com/miniconda/Miniconda3-py311_24.5.0-0-Linux-${CONDA_ARCH}.sh" -O ~/miniconda.sh && \
     /bin/bash ~/miniconda.sh -b -p /opt/conda && \
     rm ~/miniconda.sh
 
-# Configure conda to use conda-forge exclusively and set package format
+# 4. Configure conda
+# Conda-forge packages are cross-platform; conda will find the correct arch automatically
 RUN conda config --system --remove channels defaults && \
     conda config --system --add channels conda-forge && \
     conda config --system --set channel_priority strict && \
     conda config --system --set conda_build.pkg_format 2
 
-# Install conda build tools
-RUN conda install --name base --yes --override-channels -c conda-forge conda-build boa libstdcxx-ng gdal proj proj-data && \
+# 5. Install conda build tools
+# Note: libstdcxx-ng is crucial for the C++ driver's compatibility
+RUN conda install --name base --yes --override-channels -c conda-forge \
+    conda-build \
+    boa \
+    libstdcxx-ng \
+    gdal \
+    proj \
+    proj-data && \
     conda clean --all --force --yes
 
-# Set up the build space
 WORKDIR /build_space
 COPY . .
 
-# Set the default command
 CMD ["/bin/bash"]
-```
 
 -----
 
@@ -196,35 +206,41 @@ This will force the compiler to use only the headers and libraries within the co
 
 -----
 
-## Building for Linux x86\_64 (Cross-Platform)
+## Building for Linux x86_64/arm64 (Cross-Platform)
 
-Building for `linux-64` on a Mac requires using Docker.
+Building for `linux-64`/arm64 on a Mac requires using Docker.
 
 1.  **Build the Docker Image**
     From terminal in the project directory, run the following command.
 
     ```bash
-    docker build --platform linux/amd64 -t conda-builder .
+    # Create and use the builder
+    docker buildx create --name mybuilder --use || docker buildx use mybuilder
+
+    # Build and load images individually (to circumvent local Docker daemon limitations)
+    docker buildx build --platform linux/amd64 -t conda-builder-x86 --load .
+    docker buildx build --platform linux/arm64 -t conda-builder-arm --load .
     ```
 
 2.  **Build the Conda Package**
     Start the container and execute the build command inside it.
 
     ```bash
-    # Start the container with this project's directory mounted
-    docker run --platform linux/amd64 --rm -it -v "$(pwd)":/build_space conda-builder
+    # Build for AWS Graviton (Native arm64 - Fast)
+    docker run --platform linux/arm64 --rm -v "$(pwd)":/build_space \
+    conda-builder-arm \
+    conda build nisar-gdal-recipe -m nisar-gdal-recipe/conda_build_config.yaml --output-folder /build_space/conda-bld/
 
-    # Once inside the container's shell, run the build
+    # Build for Intel/AMD (Emulated x86_64 - Slower)
+    docker run --platform linux/amd64 --rm -v "$(pwd)":/build_space \
+    conda-builder-x86 \
     conda build nisar-gdal-recipe -m nisar-gdal-recipe/conda_build_config.yaml --output-folder /build_space/conda-bld/
     ```
-
-3.  **Exit the container** by typing `exit`.
-
 -----
 
 ## Build Output
 
-After a successful build, the final `.conda` packages will be located in the `conda-bld` directory, sorted by platform:
+After a successful build, the final .conda packages will be located in the `conda-bld` directory, sorted by platform:
 
-  * `./conda-bld/osx-arm64/`
-  * `./conda-bld/linux-64/`
+  * ./conda-bld/linux-64/ — For Intel/AMD EC2 instances (m5, c5, r5).
+  * ./conda-bld/linux-aarch64/— For AWS Graviton instances (m7g, c7g, r7g).
