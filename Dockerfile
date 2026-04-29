@@ -66,6 +66,7 @@ RUN conda install --name base --yes --override-channels -c conda-forge \
     boa \
     libstdcxx-ng \
     gdal \
+    hdf5 \
     proj \
     proj-data && \
     conda clean --all --force --yes
