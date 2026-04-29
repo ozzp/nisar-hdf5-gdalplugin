@@ -206,41 +206,56 @@ This will force the compiler to use only the headers and libraries within the co
 
 -----
 
+This looks sharp and technically sound! You’ve successfully navigated the "architecture gymnastics" of building Linux packages on a Mac. 
+
+I’ve applied a final **"Professional Polish"** to the formatting to ensure that comments don't bleed into your commands and that the distinction between the two builds is crystal clear for anyone else who might use this guide.
+
+---
+
 ## Building for Linux x86_64/arm64 (Cross-Platform)
 
-Building for `linux-64`/arm64 on a Mac requires using Docker.
+Building for `linux-64` and `linux-aarch64` (Graviton) on a Mac requires using Docker to provide a native Linux environment.
 
-1.  **Build the Docker Image**
-    From terminal in the project directory, run the following command.
+### 1. Build the Docker Image
+First, create a multi-arch builder and build a specific image for each architecture. This bypasses local Docker daemon limitations regarding loading multi-platform manifests.
 
-    ```bash
-    # Create and use the builder
-    docker buildx create --name mybuilder --use || docker buildx use mybuilder
+```bash
+# Create and use the builder
+docker buildx create --name mybuilder --use || docker buildx use mybuilder
 
-    # Build and load images individually (to circumvent local Docker daemon limitations)
-    docker buildx build --platform linux/amd64 -t conda-builder-x86 --load .
-    docker buildx build --platform linux/arm64 -t conda-builder-arm --load .
-    ```
+# Build and load images individually for local use
+docker buildx build --platform linux/amd64 -t conda-builder-x86 --load .
+docker buildx build --platform linux/arm64 -t conda-builder-arm --load .
+```
 
-2.  **Build the Conda Package**
-    Start the container and execute the build command inside it.
+### 2. Build the Conda Package
+Run the build command by passing it directly to the container. The `--rm` flag ensures a clean workspace by removing the container once the build finishes.
 
-    ```bash
-    # Build for AWS Graviton (Native arm64 - Fast)
-    docker run --platform linux/arm64 --rm -v "$(pwd)":/build_space \
-    conda-builder-arm \
-    conda build nisar-gdal-recipe -m nisar-gdal-recipe/conda_build_config.yaml --output-folder /build_space/conda-bld/
+**Build for AWS Graviton (Native arm64 - Fast)**
+```bash
+docker run --platform linux/arm64 --rm -v "$(pwd)":/build_space \
+  conda-builder-arm \
+  conda build nisar-gdal-recipe \
+  -m nisar-gdal-recipe/conda_build_config.yaml \
+  --output-folder /build_space/conda-bld/
+```
 
-    # Build for Intel/AMD (Emulated x86_64 - Slower)
-    docker run --platform linux/amd64 --rm -v "$(pwd)":/build_space \
-    conda-builder-x86 \
-    conda build nisar-gdal-recipe -m nisar-gdal-recipe/conda_build_config.yaml --output-folder /build_space/conda-bld/
-    ```
------
+**Build for Intel/AMD (Emulated x86_64 - Slower)**
+```bash
+docker run --platform linux/amd64 --rm -v "$(pwd)":/build_space \
+  conda-builder-x86 \
+  conda build nisar-gdal-recipe \
+  -m nisar-gdal-recipe/conda_build_config.yaml \
+  --output-folder /build_space/conda-bld/
+```
+
+---
 
 ## Build Output
 
-After a successful build, the final .conda packages will be located in the `conda-bld` directory, sorted by platform:
+After a successful build, the final `.conda` packages will be located in the `conda-bld` directory, organized by the target platform:
 
-  * ./conda-bld/linux-64/ — For Intel/AMD EC2 instances (m5, c5, r5).
-  * ./conda-bld/linux-aarch64/— For AWS Graviton instances (m7g, c7g, r7g).
+* **`./conda-bld/linux-64/`** — For Intel/AMD EC2 instances (m5, c5, r5).
+* **`./conda-bld/linux-aarch64/`** — For AWS Graviton instances (m7g, c7g, r7g).
+
+---
