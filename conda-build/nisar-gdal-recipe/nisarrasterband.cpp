@@ -34,15 +34,20 @@ NisarRasterBand::NisarRasterBand( NisarDataset *poDSIn, int nBandIn ) :
       GDALPamRasterBand(),  //Call base class construction
       hH5Type(-1)           //Initialize custom member
 {
-    this->poDS = poDSIn;
-    this->nBand = nBandIn;
-
+    // Safety Check
     if (!poDSIn)
     {
         CPLError(CE_Fatal, CPLE_AppDefined, "NisarRasterBand constructor: Parent dataset pointer is NULL.");
         this->eDataType = GDT_Unknown;
-        return; // Exit constructor in an invalid state
+        return; 
     }
+
+    this->poDS = poDSIn;
+    this->nBand = nBandIn;
+
+    // Initialize base class members first
+    this->nRasterXSize = poDSIn->GetRasterXSize();
+    this->nRasterYSize = poDSIn->GetRasterYSize();
 
     NisarDataset *poGDS = static_cast<NisarDataset *>(poDSIn);
     this->eDataType = poGDS->eDataType;
@@ -69,7 +74,8 @@ NisarRasterBand::NisarRasterBand( NisarDataset *poDSIn, int nBandIn ) :
     hid_t dcpl_id = H5Dget_create_plist(hDatasetID);
     if (dcpl_id >= 0)
     {
-        if (H5Pget_layout(dcpl_id) == H5D_CHUNKED)
+        H5D_layout_t layout = H5Pget_layout(dcpl_id);
+        if (layout == H5D_CHUNKED)
         {
             hid_t hSpace = H5Dget_space(hDatasetID);
             if (hSpace >= 0) {
@@ -83,6 +89,16 @@ NisarRasterBand::NisarRasterBand( NisarDataset *poDSIn, int nBandIn ) :
                 }
                 H5Sclose(hSpace);
             }
+        }
+        else if (layout == H5D_CONTIGUOUS)
+        {
+            this->nBlockXSize = nRasterXSize;
+            this->nBlockYSize = 1;
+        }
+        else //H5D_COMPACT or unknown
+        {
+            this->nBlockXSize = poGDS->GetRasterXSize();
+            this->nBlockYSize = 1;
         }
         H5Pclose(dcpl_id);
     }
@@ -221,115 +237,60 @@ GDALRasterBand* NisarRasterBand::GetMaskBand()
 /***************************************************************************/
 CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 {
-    // Validation and Setup
-    NisarDataset *poGDS = reinterpret_cast<NisarDataset *>(this->poDS);
-    if (!poGDS || poGDS->GetDatasetHandle() < 0 || this->hH5Type < 0 ||
-        m_hFileSpaceID < 0 || m_hMemSpaceID < 0)
-    {
-        CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: Band is not properly initialized.");
-        return CE_Failure;
-    }
+    NisarDataset *poGDS = static_cast<NisarDataset *>(poDS);
+    if (!poGDS || m_hFileSpaceID < 0 || m_hMemSpaceID < 0) return CE_Failure;
 
-    const size_t nDataTypeSize = GDALGetDataTypeSizeBytes(this->eDataType);
+    hsize_t file_start[H5S_MAX_RANK];
+    hsize_t file_count[H5S_MAX_RANK];
+    hsize_t mem_start[H5S_MAX_RANK];
+    hsize_t mem_count[H5S_MAX_RANK];
+
+    const int rank = H5Sget_simple_extent_ndims(m_hFileSpaceID);
+    const size_t nDataTypeSize = GDALGetDataTypeSizeBytes(eDataType);
     const size_t nFullBlockBytes = static_cast<size_t>(nBlockXSize) * nBlockYSize * nDataTypeSize;
 
-    // Handle Off-Image Blocks
-    hsize_t start_offset_x = static_cast<hsize_t>(nBlockXOff) * nBlockXSize;
-    hsize_t start_offset_y = static_cast<hsize_t>(nBlockYOff) * nBlockYSize;
+    // Proper buffer filling
+    memset(pImage, 0, nFullBlockBytes); 
 
-    if (start_offset_x >= static_cast<hsize_t>(nRasterXSize) ||
-        start_offset_y >= static_cast<hsize_t>(nRasterYSize) ||
-        nDataTypeSize == 0)
-    {
-        memset(pImage, 0, nFullBlockBytes);
+    hsize_t start_x = static_cast<hsize_t>(nBlockXOff) * nBlockXSize;
+    hsize_t start_y = static_cast<hsize_t>(nBlockYOff) * nBlockYSize;
+
+    if (start_x >= static_cast<hsize_t>(nRasterXSize) || start_y >= static_cast<hsize_t>(nRasterYSize))
         return CE_None;
-    }
 
-    // Read Data
-    hid_t hDatasetID = poGDS->GetDatasetHandle();
-    int rank = H5Sget_simple_extent_ndims(m_hFileSpaceID);
-    if (rank < 2) return CE_Failure; // Should have been caught earlier
+    int nActualX = std::min(nBlockXSize, nRasterXSize - static_cast<int>(start_x));
+    int nActualY = std::min(nBlockYSize, nRasterYSize - static_cast<int>(start_y));
 
-    // Calculate the actual number of pixels to read (for partial blocks).
-    int nActualBlockXSize = std::min(nBlockXSize, nRasterXSize - static_cast<int>(start_offset_x));
-    int nActualBlockYSize = std::min(nBlockYSize, nRasterYSize - static_cast<int>(start_offset_y));
+    hid_t hLocalFileSpace = H5Scopy(m_hFileSpaceID);
+    hid_t hLocalMemSpace = H5Scopy(m_hMemSpaceID);
 
-    // Simplified partial block handling
-    // Always pre-fill the entire buffer with the fill value (0).
-    // H5Dread will then overwrite the valid data area.
-    memset(pImage, 0, nFullBlockBytes);
+    for (int i = 0; i < rank; i++) { file_start[i] = 0; file_count[i] = 1; }
+    file_start[rank - 2] = start_y;
+    file_start[rank - 1] = start_x;
+    file_count[rank - 2] = nActualY;
+    file_count[rank - 1] = nActualX;
 
-    // Define the hyperslab (the block to read) in the HDF5 file.
-    std::vector<hsize_t> file_start(rank);
-    std::vector<hsize_t> file_count(rank);
-    file_start[rank - 2] = start_offset_y;
-    file_start[rank - 1] = start_offset_x;
-    file_count[rank - 2] = nActualBlockYSize;
-    file_count[rank - 1] = nActualBlockXSize;
-
-    if (rank == 3)
-    {
-        // 3D Case: [Band][Y][X]
-        // GDAL Band indices are 1-based, HDF5 is 0-based.
-        file_start[0] = static_cast<hsize_t>(this->nBand - 1);
+    if (rank == 3) {
+        // Use indices for array assignment
+        file_start[0] = static_cast<hsize_t>(nBand - 1);
         file_count[0] = 1;
     }
-    else
-    {
-        // Fallback for > 3 dimensions or 2D
-        for (int i = 0; i < rank - 2; ++i) {
-            file_start[i] = 0;
-            file_count[i] = 1;
-        }
-    }
 
-    herr_t status = H5Sselect_hyperslab(m_hFileSpaceID, H5S_SELECT_SET, file_start.data(),
-                                        nullptr, file_count.data(), nullptr);
-    if (status < 0) return CE_Failure;
+    H5Sselect_hyperslab(hLocalFileSpace, H5S_SELECT_SET, file_start, nullptr, file_count, nullptr);
 
-    // By default, write to the entire memory buffer.
-    hid_t hMemSpace = m_hMemSpaceID;
+    for (int i = 0; i < rank; i++) { mem_start[i] = 0; mem_count[i] = 1; }
+    mem_count[rank - 2] = nActualY;
+    mem_count[rank - 1] = nActualX;
 
-    // If reading a partial block, select a smaller hyperslab in memory.
-    // This tells H5Dread to place the partial data at the top-left
-    // of the buffer, leaving the rest untouched (already filled with 0).
-    if (nActualBlockXSize < nBlockXSize || nActualBlockYSize < nBlockYSize)
-    {
-        // Create N-D memory selection
-        std::vector<hsize_t> mem_start(rank, 0); // Start at {0, 0, ... 0}
-        std::vector<hsize_t> mem_count(rank);
+    H5Sselect_hyperslab(hLocalMemSpace, H5S_SELECT_SET, mem_start, nullptr, mem_count, nullptr);
 
-        // Set dimensions for Y and X
-        mem_count[rank - 2] = static_cast<hsize_t>(nActualBlockYSize);
-        mem_count[rank - 1] = static_cast<hsize_t>(nActualBlockXSize);
+    herr_t status = H5Dread(poGDS->GetDatasetHandle(), hH5Type, hLocalMemSpace, 
+                            hLocalFileSpace, H5P_DEFAULT, pImage);
 
-        // Set higher dimensions to 1
-        for (int i = 0; i < rank - 2; ++i)
-        {
-            mem_count[i] = 1;
-        }
+    H5Sclose(hLocalFileSpace);
+    H5Sclose(hLocalMemSpace);
 
-        status = H5Sselect_hyperslab(m_hMemSpaceID, H5S_SELECT_SET, mem_start.data(),
-                                     nullptr, mem_count.data(), nullptr);
-        if (status < 0) return CE_Failure;
-    } else {
-        // For a full block, select the entire memory space.
-        H5Sselect_all(m_hMemSpaceID);
-    }
-
-    // Read the data from the file hyperslab to the memory hyperslab.
-    status = H5Dread(hDatasetID, this->hH5Type, hMemSpace, m_hFileSpaceID,
-                     H5P_DEFAULT, pImage);
-
-    if (status < 0)
-    {
-        CPLError(CE_Failure, CPLE_AppDefined, "IReadBlock: H5Dread failed for block %d, %d.",
-                 nBlockXOff, nBlockYOff);
-        H5Eprint(H5E_DEFAULT, stderr);
-        return CE_Failure;
-    }
-
-    return CE_None;
+    return (status < 0) ? CE_Failure : CE_None;
 }
 
 // ====================================================================
