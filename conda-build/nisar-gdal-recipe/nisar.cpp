@@ -39,28 +39,40 @@ void GDALRegister_NISAR()
     GDALDriver *poDriver = new GDALDriver();
 
     poDriver->SetDescription( "NISAR" );
-    poDriver->SetMetadataItem( "DRIVER_VERSION", "v0.2.1 (Build Date: " __DATE__ " " __TIME__ ")" );
+    if (CPLGetConfigOption("GDAL_HTTP_MAX_RETRY", nullptr) == nullptr) {
+        CPLSetConfigOption("GDAL_HTTP_MAX_RETRY", "5");
+    }
+    poDriver->SetMetadataItem(GDAL_DCAP_VIRTUALIO, "YES");
+    // This allows GDAL's internal block cache to be more aggressive
+    // with this driver in multi-threaded scenarios.
+    poDriver->SetMetadataItem("GDAL_THREAD_SAFE", "YES");
+    poDriver->SetMetadataItem("GDAL_RAW_BINARY_LAYOUT", "YES");
+    poDriver->SetMetadataItem( "DRIVER_VERSION", "v0.3.1 (Build Date: " __DATE__ " " __TIME__ ")" );
     poDriver->SetMetadataItem( GDAL_DCAP_RASTER, "YES" );
     poDriver->SetMetadataItem( GDAL_DMD_LONGNAME,
                                "NISAR HDF5" );
     poDriver->SetMetadataItem( GDAL_DMD_HELPTOPIC,
                                "drivers/raster/nisar.html" );
     poDriver->SetMetadataItem( GDAL_DMD_EXTENSION, "h5" );
+    poDriver->SetMetadataItem( GDAL_DMD_SUBDATASETS, "YES" );
     poDriver->SetMetadataItem(
                                GDAL_DMD_OPENOPTIONLIST,
-                               "<OpenOptionList>"
-                               "  <Option name='METADATA' type='string' description='Filter specific metadata domains to load (e.g., RADARGRID, ALL)'/>"
-                               "  <Option name='DEM_FILE' type='string' description='Path to DEM (VRT or raster) for 3D cube interpolation'/>"
-                               "  <Option name='DEM_RESAMPLING' type='string-select' description='DEM interpolation method' default='CUBICSPLINE'>"
-                               "    <Value>NEAREST</Value>"
-                               "    <Value>BILINEAR</Value>"
-                               "    <Value>CUBIC</Value>"
-                               "    <Value>CUBICSPLINE</Value>"
-                               "  </Option>"
-                               "  <Option name='QUANTITY' type='string' description='Quantity to interpolate (e.g., LookAngle, IncidenceAngle)'/>"
-                               "  <Option name='MASK' type='boolean' description='Apply valid data mask (default NO)'/>"
-                               "</OpenOptionList>");
-
+                               R"(<OpenOptionList>
+                                  <Option name='ENABLE_PAGE_BUFFERING' type='boolean' description='Perform discovery pass to align HDF5 page buffering. (Note: Driver defaults to 4MB speculative alignment if NO)' default='NO'/>
+                                  <Option name='INST' type='string' description='Instrument to open' default='LSAR'/>
+                                  <Option name='FREQ' type='string' description='Frequency band to open' default='A'/>
+                                  <Option name='POL' type='string' description='Polarization to open (e.g., HHHH, HH)'/>
+                                  <Option name='METADATA' type='string' description='Filter specific metadata domains to load'/>
+                                  <Option name='DEM_FILE' type='string' description='Path to DEM for 3D cube interpolation'/>
+                                  <Option name='DEM_RESAMPLING' type='string-select' description='DEM interpolation method' default='CUBICSPLINE'>
+                                  <Value>NEAREST</Value>
+                                  <Value>BILINEAR</Value>
+                                  <Value>CUBIC</Value>
+                                  <Value>CUBICSPLINE</Value>
+                                  </Option>
+                                  <Option name='QUANTITY' type='string' description='Quantity to interpolate'/>
+                                  <Option name='MASK' type='boolean' description='Apply valid data mask (default NO)'/>
+                                  </OpenOptionList>)");
     poDriver->pfnOpen = NisarDataset::Open;
 
     poDriver->pfnIdentify = NisarDataset::Identify;

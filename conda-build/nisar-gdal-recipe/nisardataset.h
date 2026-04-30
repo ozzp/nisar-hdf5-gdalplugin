@@ -13,6 +13,23 @@
 #ifndef NISAR_DATASET_H
 #define NISAR_DATASET_H
 
+// S3 / HDF5 Page Buffer Constants
+#ifndef NISAR_DEFAULT_PAGE_SIZE
+  #define NISAR_DEFAULT_PAGE_SIZE 4194304 // 4 MiB (Standard NISAR Page)
+#endif
+
+// We want enough pages to hold a "spatial working set." 
+// 32 pages * 4 MiB = 128 MiB total buffer.
+#define NISAR_DEFAULT_PAGE_COUNT 32 
+
+// HDF5 Chunk Cache (RDCC) Constants
+// This is for uncompressed pixels. 512 MB is a baseline for L2/L3.
+#define NISAR_DEFAULT_CHUNK_CACHE_MB 512 
+
+// RDCC Slots should be a prime number roughly 10-100x the number of chunks in a cache.
+// 524287 is a large prime that should work well for NISAR's massive grids.
+#define NISAR_DEFAULT_CHUNK_CACHE_SLOTS 524287
+
 #include <string>
 #include <vector>
 #include <array>

@@ -244,71 +244,49 @@ int NisarDataset::Identify(GDALOpenInfo *poOpenInfo)
 {
     const char *pszPrefix = "NISAR:";
     size_t nPrefixLen = strlen(pszPrefix);
-    
-    // 1. Check for explicit driver prefix "NISAR:"
+
+    // Explicit Driver Prefix Check
+    // Always the fastest path.
     if (EQUALN(poOpenInfo->pszFilename, pszPrefix, nPrefixLen))
     {
-        // REQUIREMENT: Contain ".h5" anywhere, not necessarily at the end.
-        // This supports both:
-        //   "NISAR:product.h5"
-        //   "NISAR:product.h5:/science/LSAR/..." (Subdataset path)
-        CPLString osFilename = poOpenInfo->pszFilename;
-        if (osFilename.ifind(".h5") != std::string::npos)
-        {
-            return TRUE;
-        }
-        // If it starts with NISAR: but doesn't look like an HDF5 file, reject it.
-        return FALSE;
+        return (CPLString(poOpenInfo->pszFilename).ifind(".h5") != std::string::npos);
     }
-
-    // 2. Check for standard .h5 file extension (Automatic Detection without prefix)
-    // For files NOT starting with NISAR:, we strictly require the extension.
-    if (!EQUAL(NisarGetExtension(poOpenInfo->pszFilename).c_str(), "h5"))
+    
+    // Check the Header Buffer
+    // GDAL pre-loads the first 1024 bytes into poOpenInfo->pHeader.
+    // The HDF5 signature is: \211 H D F \r \n \032 \n
+    if (poOpenInfo->nHeaderBytes < 8 || 
+        memcmp(poOpenInfo->pabyHeader, "\211HDF\r\n\032\n", 8) != 0)
     {
         return FALSE;
     }
 
-    // 3. Check if it's a remote file (Heuristic)
-    // Remote files might not allow H5Fopen checks efficiently
+    // Remote/Virtual Path Heuristics
+    // We avoid H5Fopen on remote files during Identify to prevent S3 Latency Tax.
     bool bIsRemote = STARTS_WITH_CI(poOpenInfo->pszFilename, "s3://") ||
                      STARTS_WITH_CI(poOpenInfo->pszFilename, "/vsis3/") ||
-                     STARTS_WITH_CI(poOpenInfo->pszFilename, "http://") ||
-                     STARTS_WITH_CI(poOpenInfo->pszFilename, "https://");
+                     STARTS_WITH_CI(poOpenInfo->pszFilename, "http");
 
     if (bIsRemote)
     {
-        // Heuristic: If it's a remote .h5 file and "NISAR" is in the name, claim it.
+        // For remote files, we rely on the filename containing "NISAR" 
+        // OR the extension being .h5 (which we verified in step 2 via header).
         CPLString osFilename = poOpenInfo->pszFilename;
-        if (osFilename.ifind("NISAR") != std::string::npos)
-        {
-            return TRUE;
-        }
-        return FALSE; 
+        return (osFilename.ifind("NISAR") != std::string::npos);
     }
-
-    // 4. Local File Deep Check
-    // It's a local .h5 file. Open it to verify it is actually NISAR data.
     
-    // Suppress HDF5 errors
+    // Local File Deep Check
+    // Only perform this if we are certain it's HDF5 (Step 2) but need to 
+    // verify it's NISAR-flavored.
     H5E_auto2_t old_func;
-    void *old_client_data;
+    void *old_client_data; 
     H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
     H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
-
-    // Check if it's HDF5
-    htri_t bIsHDF5 = H5Fis_hdf5(poOpenInfo->pszFilename);
-    if (bIsHDF5 <= 0)
-    {
-        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
-        return FALSE;
-    }
-
-    // Check for NISAR structure
+    
     bool bIsNisar = false;
     hid_t hFile = H5Fopen(poOpenInfo->pszFilename, H5F_ACC_RDONLY, H5P_DEFAULT);
     if (hFile >= 0)
     {
-        // Check for the signature NISAR groups
         if (H5Lexists(hFile, "/science/LSAR/identification", H5P_DEFAULT) > 0 ||
             H5Lexists(hFile, "/science/SSAR/identification", H5P_DEFAULT) > 0)
         {
@@ -317,9 +295,7 @@ int NisarDataset::Identify(GDALOpenInfo *poOpenInfo)
         H5Fclose(hFile);
     }
 
-    // Restore HDF5 errors
     H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data);
-
     return bIsNisar;
 }
 /************************************************************************/
@@ -2436,7 +2412,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         CPLFree(pszActualFilename);
         return nullptr;
     }
-/////////////////////////start
+
     // Prepare Base FAPL & Filename
     hid_t fapl_id_base = H5P_DEFAULT;
     const char *filenameForH5Fopen = pszActualFilename;
@@ -2503,86 +2479,111 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         CPLDebug("NISAR_DRIVER", "Configured HDF5 FAPL for ROS3 aws-c-s3 backend.");
     }
 
-    // Pass 1: Open, Get Page Size, Close
-    hsize_t actual_page_size = 0; 
-    hid_t hHDF5_pass1 = -1;
-    hid_t fcpl_id = -1;
+    // ====================================================================
+    // Page Buffering Configuration
+    // ====================================================================
+    hsize_t nActualPageSize = NISAR_DEFAULT_PAGE_SIZE; // 4MiB
+    hid_t fapl_id_pass2 = H5P_DEFAULT;
+    bool bNeedToCloseFapl2 = false;
 
-    CPLDebug("NISAR_DRIVER", "Attempting H5Fopen (Pass 1) to get page size: %s", filenameForH5Fopen);
-    
-    H5E_auto2_t old_func;
-    void *old_client_data; // Suppress errors
-    H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
-    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
-    hHDF5_pass1 = H5Fopen(filenameForH5Fopen, H5F_ACC_RDONLY, fapl_id_base);
-    H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore errors
+    // Check if the user explicitly requested the "Double Open" discovery pass.
+    bool bDoPageDiscovery = CPLFetchBool(poOpenInfo->papszOpenOptions, "ENABLE_PAGE_BUFFERING", false);
 
-    if (hHDF5_pass1 < 0)
+    if (bDoPageDiscovery)
     {
-        CPLError(CE_Warning, CPLE_OpenFailed,
-                  "H5Fopen failed (Pass 1) for '%s'. Cannot determine optimal "
-                  "page buffer. Proceeding with defaults.",
-                  filenameForH5Fopen);
-        actual_page_size = 4 * 1024; // Fallback
-    }
-    else
-    {
-        fcpl_id = H5Fget_create_plist(hHDF5_pass1);
-        if (fcpl_id < 0)
+        // Pass 1: Open, Get Page Size, Close
+        hid_t hHDF5_pass1 = -1;
+        hid_t fcpl_id = -1;
+
+        CPLDebug("NISAR_DRIVER", "ENABLE_PAGE_BUFFERING=YES: Attempting Pass 1 discovery on %s", filenameForH5Fopen);
+
+        // Suppress errors for this probe
+        H5E_auto2_t old_func;
+        void *old_client_data;
+        H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
+        H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+        hHDF5_pass1 = H5Fopen(filenameForH5Fopen, H5F_ACC_RDONLY, fapl_id_base);
+        H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore error handling
+
+        if (hHDF5_pass1 >= 0)
         {
-            CPLError(CE_Warning, CPLE_AppDefined, "H5Fget_create_plist failed (Pass 1). Using default page size.");
-            actual_page_size = 4 * 1024;
-        }
-        else
-        {
-            if (H5Pget_file_space_page_size(fcpl_id, &actual_page_size) < 0 || actual_page_size == 0)
+            fcpl_id = H5Fget_create_plist(hHDF5_pass1);
+            if (fcpl_id >= 0)
             {
-                CPLError(CE_Warning, CPLE_AppDefined, "H5Pget_file_space_page_size failed/returned 0. Using default.");
-                actual_page_size = 4 * 1024;
+                if (H5Pget_file_space_page_size(fcpl_id, &nActualPageSize) < 0 || nActualPageSize == 0)
+                {
+                    CPLError(CE_Warning, CPLE_AppDefined, "File is not using Paged Allocation. Using default.");
+                    nActualPageSize = NISAR_DEFAULT_PAGE_SIZE;
+                }
+                H5Pclose(fcpl_id);
             }
-            H5Pclose(fcpl_id);
+            H5Fclose(hHDF5_pass1);
+            CPLDebug("NISAR_DRIVER", "Discovery Pass found page size: %lu bytes.", (unsigned long)nActualPageSize);
         }
-        H5Fclose(hHDF5_pass1);
-        CPLDebug("NISAR_DRIVER", "Determined actual file page size (or fallback): %lu bytes.", (unsigned long)actual_page_size);
+        else 
+        {
+             CPLError(CE_Warning, CPLE_OpenFailed, "Pass 1 failed to open file. Proceeding with defaults.");
+             nActualPageSize = NISAR_DEFAULT_PAGE_SIZE;
+        }
+    }
+    else 
+    {
+        CPLDebug("NISAR_DRIVER", "ENABLE_PAGE_BUFFERING=NO: Skipping discovery (Fast-Path).");
     }
 
-    // Prepare Optimized FAPL for Pass 2 by copying the base FAPL
-    hid_t fapl_id_pass2 = bNeedToCloseFaplBase ? H5Pcopy(fapl_id_base) : H5P_DEFAULT;
-    bool bNeedToCloseFapl2 = (fapl_id_pass2 != H5P_DEFAULT);
-
-    // We no longer need the base FAPL
+    // PREPARE PASS 2 FAPL
+    // We must ensure S3 credentials (if any) from fapl_id_base are carried over to Pass 2.
     if (bNeedToCloseFaplBase)
     {
+        fapl_id_pass2 = H5Pcopy(fapl_id_base);
+        bNeedToCloseFapl2 = true;
+        
+        // We can close the base now as pass2 has the copy
         H5Pclose(fapl_id_base);
         bNeedToCloseFaplBase = false;
     }
 
-    // Calculate and set optimized page buffer size on Pass 2 FAPL
-    if (actual_page_size > 0 && fapl_id_pass2 != H5P_DEFAULT)
+    // Apply Page Buffer if we have a valid page size
+    if (nActualPageSize > 0)
     {
-        // Get the requested buffer size from GDAL Config Options (Default to 16MB if not set)
-        const char* pszPageBufSize = CPLGetConfigOption("H5_PAGE_BUFFER_SIZE", "16777216");
-        size_t target_buffer_bytes = static_cast<size_t>(CPLAtoGIntBig(pszPageBufSize));
+        if (fapl_id_pass2 == H5P_DEFAULT)
+        {
+            fapl_id_pass2 = H5Pcreate(H5P_FILE_ACCESS);
+            bNeedToCloseFapl2 = true;
+        }
 
-        // Ensure it's at least one page
-        if (target_buffer_bytes < actual_page_size) target_buffer_bytes = actual_page_size;
+        // Determine Target Buffer Size
+        size_t nTargetBufferBytes;
+        const char* pszPageBufSize = CPLGetConfigOption("H5_PAGE_BUFFER_SIZE", nullptr);
 
-        // Calculate how many pages fit in that target
-        unsigned int num_pages_in_buffer = target_buffer_bytes / actual_page_size;
+        if (pszPageBufSize) 
+        {
+            // User provided an override
+            nTargetBufferBytes = static_cast<size_t>(CPLAtoGIntBig(pszPageBufSize));
+        } 
+        else 
+        {
+            // Use our high-performance defaults (e.g., 32 pages * 4MiB = 128MiB)
+            nTargetBufferBytes = (size_t)nActualPageSize * NISAR_DEFAULT_PAGE_COUNT;
+        }
 
-        // Round to exact multiple of actual_page_size
-        size_t page_buffer_bytes = num_pages_in_buffer * actual_page_size;
-        
-        CPLDebug("NISAR_DRIVER", "Setting OPTIMIZED HDF5 page buffer: %u pages, Total=%lu bytes.",
-                 num_pages_in_buffer, (unsigned long)page_buffer_bytes);
-                 
+        // Alignment Safety Check
+        if (nTargetBufferBytes < nActualPageSize) nTargetBufferBytes = nActualPageSize;
+
+        // Calculate exact multiples to satisfy HDF5 requirements
+        unsigned int num_pages_in_buffer = (unsigned int)(nTargetBufferBytes / nActualPageSize);
+        size_t page_buffer_bytes = (size_t)num_pages_in_buffer * (size_t)nActualPageSize;
+
+        CPLDebug("NISAR_DRIVER", "Setting HDF5 page buffer: %u pages, Total=%lu bytes.",
+                  num_pages_in_buffer, (unsigned long)page_buffer_bytes);
+
         if (H5Pset_page_buffer_size(fapl_id_pass2, page_buffer_bytes, 0, 0) < 0)
         {
-            CPLError(CE_Warning, CPLE_AppDefined, "Failed to set optimized HDF5 page buffer size.");
+            CPLError(CE_Warning, CPLE_AppDefined, "Failed to set HDF5 page buffer size.");
         }
     }
 
-/////////////////// end
     // Pass 2: Open HDF5 file
     hid_t hHDF5 = -1;
     CPLDebug("NISAR_DRIVER", "Attempting H5Fopen (Pass 2) with optimized FAPL: %s",
@@ -2998,41 +2999,48 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 
     // Prepare DAPL with Chunk Cache
     poDS->hDataset = -1;
-    hid_t dapl_id = H5P_DEFAULT;  // Default DAPL initially
-    bool bNeedToCloseDapl = false;
+    hid_t dapl_id = H5Pcreate(H5P_DATASET_ACCESS);
+    bool bNeedToCloseDapl = (dapl_id >= 0);
 
-    dapl_id = H5Pcreate(H5P_DATASET_ACCESS);
     if (dapl_id >= 0)
     {
-        bNeedToCloseDapl = true;
         size_t rdcc_nslots, rdcc_nbytes;
         double rdcc_w0;
-        H5Pget_chunk_cache(dapl_id, &rdcc_nslots, &rdcc_nbytes,
-                           &rdcc_w0);  // Get defaults
-        // Set desired cache size (e.g., 128 MB) - TODO: Make configurable
-        size_t new_cache_size_mb =
-            CPLScanLong(CPLGetConfigOption("NISAR_CHUNK_CACHE_SIZE_MB", "512"),
-                        512);  // Read from config option
-        size_t new_nbytes = new_cache_size_mb * 1024 * 1024;
-        //size_t new_nslots = std::max((size_t)10009, rdcc_nslots * 4);  // Heuristic, prime num often good
-        size_t new_nslots = (size_t)CPLScanLong(CPLGetConfigOption("NISAR_CHUNK_CACHE_SLOTS", "524287"), 524287);
-        herr_t cache_status =
-            H5Pset_chunk_cache(dapl_id, new_nslots, new_nbytes, rdcc_w0);
-        if (cache_status < 0)
+
+        // Get library defaults first
+        H5Pget_chunk_cache(dapl_id, &rdcc_nslots, &rdcc_nbytes, &rdcc_w0);
+
+        // Determine Cache Size (MB)
+        const char* pszCacheSizeMB = CPLGetConfigOption("NISAR_CHUNK_CACHE_SIZE_MB", nullptr);
+        size_t nCacheSizeBytes;
+
+        if (pszCacheSizeMB) {
+            nCacheSizeBytes = (size_t)CPLAtoGIntBig(pszCacheSizeMB) * 1024 * 1024;
+        } else {
+            // Use our high-performance baseline (e.g., 512 MB)
+            nCacheSizeBytes = (size_t)NISAR_DEFAULT_CHUNK_CACHE_MB * 1024 * 1024;
+        }
+
+        // Determine Cache Slots
+        const char* pszCacheSlots = CPLGetConfigOption("NISAR_CHUNK_CACHE_SLOTS", nullptr);
+        size_t nCacheSlots;
+
+        if (pszCacheSlots) {
+            nCacheSlots = (size_t)CPLAtoGIntBig(pszCacheSlots);
+        } else {
+            // Use our optimized prime number baseline
+            nCacheSlots = (size_t)NISAR_DEFAULT_CHUNK_CACHE_SLOTS;
+        }
+
+        // Apply settings
+        if (H5Pset_chunk_cache(dapl_id, nCacheSlots, nCacheSizeBytes, rdcc_w0) < 0)
         {
-            CPLError(CE_Warning, CPLE_AppDefined,
-                     "Failed to set HDF5 chunk cache.");
-            H5Pclose(dapl_id);
-            dapl_id = H5P_DEFAULT;
-            bNeedToCloseDapl = false;
+            CPLError(CE_Warning, CPLE_AppDefined, "Failed to set HDF5 chunk cache on DAPL.");
         }
         else
         {
-            CPLDebug("NISAR_DRIVER",
-                     "Set HDF5 chunk cache: slots=%lu, size=%lu bytes (%.0f "
-                     "MB), w0=%.2f",
-                     (unsigned long)new_nslots, (unsigned long)new_nbytes,
-                     (double)new_cache_size_mb, rdcc_w0);
+             CPLDebug("NISAR_DRIVER", "Set HDF5 chunk cache: slots=%lu, size=%lu MiB",
+                      (unsigned long)nCacheSlots, (unsigned long)(nCacheSizeBytes / (1024 * 1024)));
         }
     }
     else
