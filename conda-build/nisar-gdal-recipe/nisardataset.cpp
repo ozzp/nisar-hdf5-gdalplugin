@@ -2578,10 +2578,21 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         CPLDebug("NISAR_DRIVER", "Setting HDF5 page buffer: %u pages, Total=%lu bytes.",
                   num_pages_in_buffer, (unsigned long)page_buffer_bytes);
 
-        if (H5Pset_page_buffer_size(fapl_id_pass2, page_buffer_bytes, 0, 0) < 0)
+        // Encourage HDF5 library to group contiguous raw data pages together 
+        // before sending them to the ROS3 driver
+        // Set a 128 MiB buffer
+        // 20% reserved for metadata, 50% for raw data, the rest is "floating"
+        unsigned int min_meta = 20; 
+        unsigned int min_raw = 50;
+
+        if (H5Pset_page_buffer_size(fapl_id_pass2, page_buffer_bytes, min_meta, min_raw) < 0)
         {
             CPLError(CE_Warning, CPLE_AppDefined, "Failed to set HDF5 page buffer size.");
         }
+
+        // Set the metadata block size to match page size
+        // This prevents the library from making many tiny metadata requests
+        H5Pset_meta_block_size(fapl_id_pass2, nActualPageSize);
     }
 
     // Pass 2: Open HDF5 file
