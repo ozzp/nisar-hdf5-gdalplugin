@@ -41,6 +41,9 @@ private:
     double m_adfTargetGeoTransform[6] = {0, 1, 0, 0, 0, 1};
     OGRSpatialReference m_oSRS;
 
+    // Add the cached inverse transform
+    double m_adfCubeInvGeoTransform[6] = {0, 1, 0, 0, 0, 1};
+
 public:
     NisarInterpolatedDataset();
     ~NisarInterpolatedDataset() override;

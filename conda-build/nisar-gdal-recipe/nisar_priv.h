@@ -54,7 +54,7 @@ static inline std::string get_hdf5_object_name(hid_t hObjectID)
     std::string sName;
     sName.resize(nNameLen);
 
-    if (H5Iget_name(hObjectID, &sName, nNameLen + 1) < 0)
+    if (H5Iget_name(hObjectID, &sName[0], nNameLen + 1) < 0)
     {
         CPLError(CE_Warning, CPLE_AppDefined,
                  "H5Iget_name failed to retrieve object name.");
