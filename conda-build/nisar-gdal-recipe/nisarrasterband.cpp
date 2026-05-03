@@ -21,6 +21,7 @@
 #include <cstring>     // For memset
 #include <mutex>       // For std::lock_guard
 #include <iomanip>     // for std::setprecision
+#include <chrono>      // for timing instrumentation of H5Dread call
 
 /************************************************************************/
 /* ==================================================================== */
@@ -249,7 +250,7 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     const size_t nDataTypeSize = GDALGetDataTypeSizeBytes(eDataType);
     const size_t nFullBlockBytes = static_cast<size_t>(nBlockXSize) * nBlockYSize * nDataTypeSize;
 
-    // Proper buffer filling
+    // buffer filling
     memset(pImage, 0, nFullBlockBytes); 
 
     hsize_t start_x = static_cast<hsize_t>(nBlockXOff) * nBlockXSize;
@@ -284,9 +285,84 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 
     H5Sselect_hyperslab(hLocalMemSpace, H5S_SELECT_SET, mem_start, nullptr, mem_count, nullptr);
 
-    herr_t status = H5Dread(poGDS->GetDatasetHandle(), hH5Type, hLocalMemSpace, 
+    // Dynamic Memory Type Mapping
+    // Tell HDF5 exactly what layout the pImage buffer requires.
+    // This activates HDF5 2.0's automatic bfloat16-to-float upscaling and complex parsing.
+    hid_t hMemDataType = -1;
+    bool bCloseMemType = false;
+
+    switch (eDataType)
+    {
+        case GDT_Byte:    hMemDataType = H5T_NATIVE_UINT8; break;
+        case GDT_UInt16:  hMemDataType = H5T_NATIVE_UINT16; break;
+        case GDT_Int16:   hMemDataType = H5T_NATIVE_INT16; break;
+        case GDT_UInt32:  hMemDataType = H5T_NATIVE_UINT32; break;
+        case GDT_Int32:   hMemDataType = H5T_NATIVE_INT32; break;
+        case GDT_UInt64:  hMemDataType = H5T_NATIVE_UINT64; break;
+        case GDT_Int64:   hMemDataType = H5T_NATIVE_INT64; break;
+        case GDT_Float32: hMemDataType = H5T_NATIVE_FLOAT; break;
+        case GDT_Float64: hMemDataType = H5T_NATIVE_DOUBLE; break;
+        case GDT_CFloat32:
+#ifdef H5T_COMPLEX
+            hMemDataType = H5T_NATIVE_FLOAT_COMPLEX;
+#else
+            // Fallback for pre-2.0 matching GDAL's [real, imag] memory layout
+            hMemDataType = H5Tcreate(H5T_COMPOUND, sizeof(float) * 2);
+            H5Tinsert(hMemDataType, "r", 0, H5T_NATIVE_FLOAT);
+            H5Tinsert(hMemDataType, "i", sizeof(float), H5T_NATIVE_FLOAT);
+            bCloseMemType = true;
+#endif
+            break;
+        case GDT_CFloat64:
+#ifdef H5T_COMPLEX
+            hMemDataType = H5T_NATIVE_DOUBLE_COMPLEX;
+#else
+            hMemDataType = H5Tcreate(H5T_COMPOUND, sizeof(double) * 2);
+            H5Tinsert(hMemDataType, "r", 0, H5T_NATIVE_DOUBLE);
+            H5Tinsert(hMemDataType, "i", sizeof(double), H5T_NATIVE_DOUBLE);
+            bCloseMemType = true;
+#endif
+            break;
+        case GDT_CInt16:
+            // C standards lack native complex integer macros, so we manually construct it 
+            hMemDataType = H5Tcreate(H5T_COMPOUND, sizeof(short) * 2);
+            H5Tinsert(hMemDataType, "r", 0, H5T_NATIVE_SHORT);
+            H5Tinsert(hMemDataType, "i", sizeof(short), H5T_NATIVE_SHORT);
+            bCloseMemType = true;
+            break;
+        case GDT_CInt32:
+            hMemDataType = H5Tcreate(H5T_COMPOUND, sizeof(int) * 2);
+            H5Tinsert(hMemDataType, "r", 0, H5T_NATIVE_INT);
+            H5Tinsert(hMemDataType, "i", sizeof(int), H5T_NATIVE_INT);
+            bCloseMemType = true;
+            break;
+        default:
+            hMemDataType = hH5Type; // Fallback to raw dataset type if unknown
+            break;
+    }
+
+
+    // Start the high-resolution timer
+    auto t_start = std::chrono::high_resolution_clock::now();
+    
+    // Call read using targeted memory type
+    herr_t status = H5Dread(poGDS->GetDatasetHandle(), hMemDataType, hLocalMemSpace,
                             hLocalFileSpace, H5P_DEFAULT, pImage);
 
+    // Stop the timer
+    auto t_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> t_diff = t_end - t_start;
+
+    // Log the performance metrics using GDAL's CPLDebug
+    // This allows to filter the output using CPL_DEBUG=NISAR_ROS3_PERF
+    CPLDebug("NISAR_ROS3_PERF", 
+             "H5Dread Block(X:%d, Y:%d) | BlockSize: %dx%d | Bytes: %zu | Time: %.3f ms",
+             nBlockXOff, nBlockYOff, nActualX, nActualY, nFullBlockBytes, t_diff.count());
+
+    // Cleanup dynamic handles
+    if (bCloseMemType) {
+        H5Tclose(hMemDataType);
+    }
     H5Sclose(hLocalFileSpace);
     H5Sclose(hLocalMemSpace);
 
@@ -294,16 +370,23 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 }
 
 // ====================================================================
-// NisarHDF5MaskBand Implementation (Corrected Name)
+// NisarHDF5MaskBand Implementation
 // ====================================================================
 
 NisarHDF5MaskBand::NisarHDF5MaskBand(NisarDataset* poDSIn, hid_t hMaskDS, NisarMaskType eType) :
     m_hMaskDS(hMaskDS),
-    m_eType(eType) // FIX 3: This now works because eType is in the arguments
+    m_hMaskFileSpaceID(-1),
+    m_eType(eType)
 {
     this->poDS = poDSIn;
     this->nBand = 0; // Mask bands usually have nBand=0
     this->eDataType = GDT_Byte;
+ 
+    // CACHE THE DATASPACE ONCE
+    if (m_hMaskDS >= 0)
+    {
+        m_hMaskFileSpaceID = H5Dget_space(m_hMaskDS);
+    }
 
     // Copy dimensions/blocking from the parent dataset
     this->nRasterXSize = poDSIn->GetRasterXSize();
@@ -326,12 +409,21 @@ NisarHDF5MaskBand::NisarHDF5MaskBand(NisarDataset* poDSIn, hid_t hMaskDS, NisarM
 
 NisarHDF5MaskBand::~NisarHDF5MaskBand()
 {
+    // CLEANLY RELEASE CACHED SPACE
+    if (m_hMaskFileSpaceID >= 0)
+    {
+        H5Sclose(m_hMaskFileSpaceID);
+        m_hMaskFileSpaceID = -1;
+    }
+
     if (m_hMaskDS >= 0) {
         H5Dclose(m_hMaskDS);
     }
 }
 CPLErr NisarHDF5MaskBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 {
+    if (m_hMaskDS < 0 || m_hMaskFileSpaceID < 0) return CE_Failure;
+
     // Pre-fill the GDAL buffer with 0 (Invalid) to handle partial block padding
     int nFullBlockPixels = nBlockXSize * nBlockYSize;
     memset(pImage, 0, nFullBlockPixels);
@@ -363,13 +455,24 @@ CPLErr NisarHDF5MaskBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImag
         H5Sselect_hyperslab(hMemSpace, H5S_SELECT_SET, mem_start, nullptr, count, nullptr);
     }
 
-    hid_t hFileSpace = H5Dget_space(m_hMaskDS);
+    hid_t hFileSpace = H5Scopy(m_hMaskFileSpaceID);
     H5Sselect_hyperslab(hFileSpace, H5S_SELECT_SET, offset, nullptr, count, nullptr);
 
     // Read into the buffer provided by GDAL
     GByte* pbyBuffer = static_cast<GByte*>(pImage);
 
+    // INSTRUMENTATION START
+    auto t_start = std::chrono::high_resolution_clock::now();
+
     herr_t status = H5Dread(m_hMaskDS, H5T_NATIVE_UINT8, hMemSpace, hFileSpace, H5P_DEFAULT, pbyBuffer);
+
+    auto t_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> t_diff = t_end - t_start;
+
+    CPLDebug("NISAR_MASK_PERF", 
+             "Mask H5Dread Block(X:%d, Y:%d) | RequestSize: %dx%d | Time: %.3f ms",
+             nBlockXOff, nBlockYOff, nRequestX, nRequestY, t_diff.count());
+    // INSTRUMENTATION END
 
     H5Sclose(hFileSpace);
     H5Sclose(hMemSpace);
