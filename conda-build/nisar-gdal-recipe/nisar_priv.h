@@ -249,8 +249,9 @@ static herr_t NISAR_AttributeCallback(hid_t hLocation, const char *attr_name,
                         name1 = H5Tget_member_name(native_type, 0);
                         name2 = H5Tget_member_name(native_type, 1);
 
-                        bool isReal = (name1 && (name1 == 'r' || name1 == 'R'));
-                        bool isImaginary = (name2 && (name2 == 'i' || name2 == 'I'));
+                        // Check conventional naming ('r'/'i' or 'R'/'I')
+                        bool isReal = (name1 && (name1[0] == 'r' || name1[0] == 'R'));
+                        bool isImaginary = (name2 && (name2[0] == 'i' || name2[0] == 'I'));
 
                         if (isReal && isImaginary)
                         {
@@ -374,7 +375,7 @@ static herr_t NISAR_AttributeCallback(hid_t hLocation, const char *attr_name,
     }
 
     std::string finalKey;
-    if (data->pszPrefix && data->pszPrefix != '\0')
+    if (data->pszPrefix && data->pszPrefix[0] != '\0')
         finalKey = std::string(data->pszPrefix) + "#" + attr_name;
     else
         finalKey = attr_name;
