@@ -984,6 +984,41 @@ GDALDataType NisarDataset::GetGDALDataType(hid_t hH5Type)
 
     // Check if it's a Compound Type (Potentially Complex)
     H5T_class_t eHDF5Class = H5Tget_class(hH5Type);
+
+#ifdef H5T_COMPLEX
+    //  HDF5 2.0 NATIVE COMPLEX SUPPORT
+    if (eHDF5Class == H5T_COMPLEX)
+    {
+        CPLDebug("NISAR_GetGDALDataType",
+                 "Checking HDF5 2.0 Native Complex type for GDAL mapping.");
+                 
+        hid_t hBaseType = H5Tget_super(hH5Type);
+        GDALDataType eComplexType = GDT_Unknown;
+
+        if (hBaseType >= 0)
+        {
+            if (H5Tequal(hBaseType, H5T_NATIVE_FLOAT) > 0)
+                eComplexType = GDT_CFloat32;
+            else if (H5Tequal(hBaseType, H5T_NATIVE_DOUBLE) > 0)
+                eComplexType = GDT_CFloat64;
+            else if (H5Tequal(hBaseType, H5T_NATIVE_SHORT) > 0)
+                eComplexType = GDT_CInt16;
+            else if (H5Tequal(hBaseType, H5T_NATIVE_INT) > 0)
+                eComplexType = GDT_CInt32;
+
+            H5Tclose(hBaseType);
+        }
+
+        if (eComplexType != GDT_Unknown)
+        {
+            return eComplexType;
+        }
+        CPLDebug("NISAR_GetGDALDataType",
+                 "Native complex type has unhandled base type.");
+    }
+#endif
+
+    // Check if it's a Compound Type (Legacy Complex)
     if (eHDF5Class == H5T_COMPOUND)
     {
         CPLDebug("NISAR_GetGDALDataType",
@@ -1046,7 +1081,7 @@ GDALDataType NisarDataset::GetGDALDataType(hid_t hH5Type)
                 hImagType = -1;
             }
             else
-            { /* Handle error getting member types */
+            { // Handle error getting member types
                 if (hRealType >= 0)
                     H5Tclose(hRealType);
                 if (hImagType >= 0)

@@ -2,9 +2,9 @@
 #include "nisarinterpolated.h"
 
 #include <cmath>
-#include <cmath>
 #include <algorithm>
 #include <limits>
+#include <chrono>
 
 // ====================================================================
 // NisarInterpolatedRasterBand Implementation
@@ -23,6 +23,9 @@ NisarInterpolatedRasterBand::NisarInterpolatedRasterBand(NisarInterpolatedDatase
 
 CPLErr NisarInterpolatedRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void* pImage)
 {
+    // INSTRUMENTATION START
+    auto t_start = std::chrono::high_resolution_clock::now();
+
     NisarInterpolatedDataset* poGDS = static_cast<NisarInterpolatedDataset*>(poDS);
     float* pafOutput = static_cast<float*>(pImage);
 
@@ -57,21 +60,8 @@ CPLErr NisarInterpolatedRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, v
         }
     }
 
-    // TODO: switch to using precalculated transform.
     // Use the pre-calculated inverse GeoTransform from the Dataset class!
-    //double* adfCubeInvGeoTransform = poGDS->m_adfCubeInvGeoTransform;
-
-    // Pre-calculate the inverse of the coarse cube's GeoTransform
-    double adfCubeInvGeoTransform[6];
-    if (!GDALInvGeoTransform(poGDS->m_adfCubeGeoTransform, adfCubeInvGeoTransform)) {
-        CPLError(CE_Failure, CPLE_AppDefined, "Cannot invert coarse cube GeoTransform.");
-        return CE_Failure;
-    }
-
-    // Initialize output buffer with NoData
-    for (int i = 0; i < nBlockXSize * nBlockYSize; ++i) {
-        pafOutput[i] = std::numeric_limits<float>::quiet_NaN();
-    }
+    double* adfCubeInvGeoTransform = poGDS->m_adfCubeInvGeoTransform;
 
     int nCubeX = poGDS->m_nCubeXSize;
     int nCubeY = poGDS->m_nCubeYSize;
@@ -82,22 +72,30 @@ CPLErr NisarInterpolatedRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, v
         return poGDS->m_cubeData[z * (nCubeX * nCubeY) + y * nCubeX + x];
     };
 
+    // Pre-extract Target GeoTransform elements for faster inner-loop math
+    double dfTargetT0 = poGDS->m_adfTargetGeoTransform[0];
+    double dfTargetT1 = poGDS->m_adfTargetGeoTransform[1]; // X-pixel width
+    double dfTargetT2 = poGDS->m_adfTargetGeoTransform[2];
+    double dfTargetT3 = poGDS->m_adfTargetGeoTransform[3];
+    double dfTargetT4 = poGDS->m_adfTargetGeoTransform[4]; // Y-pixel width/rotation
+    double dfTargetT5 = poGDS->m_adfTargetGeoTransform[5];
+
     // Loop over every pixel in the requested block
     for (int y = 0; y < nReqYSize; ++y) 
     {
+        // HOISTED MATH: Calculate the base X and Y for the start of this row.
+        // This avoids recalculating the Y-dependent part of the transform 512 times per row.
+        double dfBaseGeoX = dfTargetT0 + (nXOff + 0.5) * dfTargetT1 + (nYOff + y + 0.5) * dfTargetT2;
+        double dfBaseGeoY = dfTargetT3 + (nXOff + 0.5) * dfTargetT4 + (nYOff + y + 0.5) * dfTargetT5;
+
         for (int x = 0; x < nReqXSize; ++x) 
         {
             float targetZ = demHeights[y * nReqXSize + x];
             if (std::isnan(targetZ)) continue; // Skip NoData pixels (e.g., ocean)
             
             // Calculate real-world X and Y for this target pixel
-            double dfGeoX = poGDS->m_adfTargetGeoTransform[0] + 
-                            (nXOff + x + 0.5) * poGDS->m_adfTargetGeoTransform[1] + 
-                            (nYOff + y + 0.5) * poGDS->m_adfTargetGeoTransform[2];
-                            
-            double dfGeoY = poGDS->m_adfTargetGeoTransform[3] + 
-                            (nXOff + x + 0.5) * poGDS->m_adfTargetGeoTransform[4] + 
-                            (nYOff + y + 0.5) * poGDS->m_adfTargetGeoTransform[5];
+            double dfGeoX = dfBaseGeoX + (x * dfTargetT1);
+            double dfGeoY = dfBaseGeoY + (x * dfTargetT4);
 
             // Convert World X,Y into the Coarse Cube's fractional pixel coordinates
             double dfCubePixelX = adfCubeInvGeoTransform[0] + 
@@ -188,6 +186,13 @@ CPLErr NisarInterpolatedRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, v
             pafOutput[y * nBlockXSize + x] = static_cast<float>(final_val);
         }
     }
+    // INSTRUMENTATION END
+    auto t_end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> t_diff = t_end - t_start;
+
+    CPLDebug("NISAR_INTERP_PERF",
+             "Interpolation Block(X:%d, Y:%d) | Size: %dx%d | Time: %.3f ms",
+             nBlockXOff, nBlockYOff, nReqXSize, nReqYSize, t_diff.count());
 
     return CE_None;
 }
