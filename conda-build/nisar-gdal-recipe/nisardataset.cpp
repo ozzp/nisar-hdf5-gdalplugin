@@ -2279,24 +2279,6 @@ void NisarDataset::LoadMetadataDomain(const std::string& sKeyword)
 /* (dimensions, data type, etc.) using HDF5 API calls.                  */
 /* Creates raster bands (NisarRasterBand) for the dataset.             */
 /************************************************************************/
-// *********************************************************************
-// ** IMPORTANT AWS AUTHENTICATION FOR ROS3 VFD:                      **
-// ** This driver relies on the HDF5 ROS3 VFD picking up AWS          **
-// ** credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,          **
-// ** AWS_SESSION_TOKEN) and region (AWS_REGION or                    **
-// ** HDF5_ROS3_AWS_REGION) from ENVIRONMENT VARIABLES.               **
-// ** It does NOT directly read ~/.aws/credentials or handle profiles.**
-// ** To use credentials from a profile (e.g., 'saml-pub'), ensure    **
-// ** these environment variables are set correctly *before* running  **
-// ** the GDAL command                                                **
-// *********************************************************************
-// ******************************************************************
-// ** CRITICAL WARNING: AWS_SESSION_TOKEN IS *NOT* SUPPORTED       **
-// ** by the H5FD_ros3_fapl_t struct in HDF5 <= 1.14.2             **
-// ** If a session token is required (e.g., for SAML/IAM temp      **
-// ** credentials), this configuration method WILL FAIL silently   **
-// ** or with signature errors later.                              **
-// ******************************************************************
 GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 {
     // ====================================================================
@@ -2490,10 +2472,27 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
         H5FD_ros3_fapl_t ros3_fapl_conf;
         memset(&ros3_fapl_conf, 0, sizeof(H5FD_ros3_fapl_t));
         ros3_fapl_conf.version = H5FD_CURR_ROS3_FAPL_T_VERSION;
-        
-        // FALSE triggers the aws-c-s3 standard credential provider chain
-        // (Env -> Profile -> STS -> EC2 -> Anonymous) and auto-discovers the Region.
-        ros3_fapl_conf.authenticate = FALSE; 
+
+        // Check if the user explicitly requested anonymous access
+        bool bNoSignRequest = CPLTestBool(CPLGetConfigOption("AWS_NO_SIGN_REQUEST", "NO"));
+
+        if (bNoSignRequest)
+        {
+            CPLDebug("NISAR_DRIVER", "AWS_NO_SIGN_REQUEST=YES detected. Using anonymous ROS3 access.");
+            ros3_fapl_conf.authenticate = FALSE;
+        }
+        else
+        {
+            CPLDebug("NISAR_DRIVER", "Using authenticated ROS3 access with standard credential chain.");
+            ros3_fapl_conf.authenticate = TRUE;
+            strcpy(ros3_fapl_conf.aws_region, "");
+            strcpy(ros3_fapl_conf.secret_id, "");
+            strcpy(ros3_fapl_conf.secret_key, "");
+
+#if H5FD_CURR_ROS3_FAPL_T_VERSION > 1
+            strcpy(ros3_fapl_conf.session_token, "");
+#endif
+        }
 
         if (H5Pset_fapl_ros3(fapl_id_base, &ros3_fapl_conf) < 0)
         {
