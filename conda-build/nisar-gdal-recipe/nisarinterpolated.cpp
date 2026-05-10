@@ -130,7 +130,8 @@ GDALDataset* NisarInterpolatedDataset::Open(GDALOpenInfo* poOpenInfo)
     }
 
     poDS->m_poAlignedDEM->SetProjection(pszTargetWKT);
-    poDS->m_poAlignedDEM->SetGeoTransform(poDS->m_adfTargetGeoTransform);
+    //poDS->m_poAlignedDEM->SetGeoTransform(poDS->m_adfTargetGeoTransform);
+    GDALSetGeoTransform(poDS->m_poAlignedDEM, poDS->m_adfTargetGeoTransform);
     poDS->m_poAlignedDEM->GetRasterBand(1)->Fill(0.0);
 
     //  Fetch the user's requested resampling method (Defaulting to CUBICSPLINE)
@@ -180,7 +181,17 @@ GDALDataset* NisarInterpolatedDataset::Open(GDALOpenInfo* poOpenInfo)
     poDS->m_nCubeXSize = poCoarseCubeDS->GetRasterXSize();
     poDS->m_nCubeYSize = poCoarseCubeDS->GetRasterYSize();
     poDS->m_nCubeZSize = poCoarseCubeDS->GetRasterCount();
-    poCoarseCubeDS->GetGeoTransform(poDS->m_adfCubeGeoTransform);
+    GDALGetGeoTransform(poCoarseCubeDS, poDS->m_adfCubeGeoTransform);
+
+    // Calculate the inverse transform ONCE during setup
+    if (!GDALInvGeoTransform(poDS->m_adfCubeGeoTransform, poDS->m_adfCubeInvGeoTransform)) 
+    {
+        CPLError(CE_Failure, CPLE_AppDefined, 
+                 "Cannot invert coarse cube GeoTransform during dataset initialization.");
+        delete poDS; 
+        GDALClose(poCoarseCubeDS);
+        return nullptr; 
+    }
 
     // Read Z-axis (heightAboveEllipsoid) from metadata
     poDS->m_zVect.reserve(poDS->m_nCubeZSize);
@@ -197,9 +208,15 @@ GDALDataset* NisarInterpolatedDataset::Open(GDALOpenInfo* poOpenInfo)
     for (int z = 0; z < poDS->m_nCubeZSize; ++z) {
         GDALRasterBand* pCBand = poCoarseCubeDS->GetRasterBand(z + 1);
         float* pDst = poDS->m_cubeData.data() + (z * poDS->m_nCubeXSize * poDS->m_nCubeYSize);
-        pCBand->RasterIO(GF_Read, 0, 0, poDS->m_nCubeXSize, poDS->m_nCubeYSize,
-                         pDst, poDS->m_nCubeXSize, poDS->m_nCubeYSize,
-                         GDT_Float32, 0, 0, nullptr);
+        if (pCBand->RasterIO(GF_Read, 0, 0, poDS->m_nCubeXSize, poDS->m_nCubeYSize,
+                             pDst, poDS->m_nCubeXSize, poDS->m_nCubeYSize,
+                             GDT_Float32, 0, 0, nullptr) != CE_None)
+        {
+            CPLError(CE_Failure, CPLE_AppDefined, "Failed to read coarse cube data via RasterIO.");
+            delete poDS;
+            GDALClose(poCoarseCubeDS);
+            return nullptr;
+        }
     }
 
     GDALClose(poCoarseCubeDS); // Done with the coarse cube

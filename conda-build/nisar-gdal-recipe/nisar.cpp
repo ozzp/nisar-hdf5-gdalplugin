@@ -13,6 +13,7 @@
 #include "gdal_priv.h"
 #include "nisardataset.h"
 #include "gdal_version.h"
+#include "hdf5vfl.h"
 
 CPL_C_START
 void CPL_DLL GDALRegister_NISAR();
