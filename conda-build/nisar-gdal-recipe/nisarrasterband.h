@@ -14,6 +14,7 @@
 #define NISAR_RASTER_BAND_H
 
 #include <mutex>
+
 #include "gdal_pam.h"
 #include "gdal_priv.h"
 #include "gdal_version.h"

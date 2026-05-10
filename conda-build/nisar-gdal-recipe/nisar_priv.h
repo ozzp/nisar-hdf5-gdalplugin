@@ -1,14 +1,6 @@
 #ifndef NISAR_PRIV_H
 #define NISAR_PRIV_H
 
-#include "hdf5.h"
-#include "cpl_string.h"  // For CSLSetNameValue, CPLDebug, CPLError
-#include "cpl_conv.h"    // For CPLStrdup, CPLFree
-#include "cpl_error.h"
-#include "gdal_priv.h"
-#include "gdal_version.h"
-#include "gdal.h"  // For CE_Failure etc.
-
 #include <string>
 #include <vector>
 #include <sstream>
@@ -16,6 +8,14 @@
 #include <limits>
 #include <complex> // Added for native complex number mapping
 #include <cmath>
+
+#include "hdf5.h"
+#include "cpl_string.h"  // For CSLSetNameValue, CPLDebug, CPLError
+#include "cpl_conv.h"    // For CPLStrdup, CPLFree
+#include "cpl_error.h"
+#include "gdal_priv.h"
+#include "gdal_version.h"
+#include "gdal.h"  // For CE_Failure etc.
 
 // Define the logic strategy for the mask
 enum class NisarMaskType {

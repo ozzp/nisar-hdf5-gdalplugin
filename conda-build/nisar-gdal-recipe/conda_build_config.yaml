@@ -6,8 +6,12 @@ gdal:
 python:
   - "3.12"
 
+# Bump compilers to 16 for macOS to support modern Apple SDK builtins (remove_reference).
+# The [#dir selector] applies the bump only to macOS platforms.
 c_compiler_version:
-  - "12"
+  - "16"  # [osx]
+  - "12"  # [linux]
 
 cxx_compiler_version:
-  - "12"
+  - "16"  # [osx]
+  - "12"  # [linux]

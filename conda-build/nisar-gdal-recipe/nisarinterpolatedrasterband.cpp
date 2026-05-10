@@ -1,10 +1,10 @@
-#include "nisarinterpolatedrasterband.h"
-#include "nisarinterpolated.h"
-
 #include <cmath>
 #include <algorithm>
 #include <limits>
 #include <chrono>
+
+#include "nisarinterpolatedrasterband.h"
+#include "nisarinterpolated.h"
 
 // ====================================================================
 // NisarInterpolatedRasterBand Implementation
