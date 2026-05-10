@@ -10,18 +10,20 @@
 /* before exporting such information to foreign countries or providing access to foreign persons.                         */
 /**************************************************************************************************************************/
 
-#include "nisarrasterband.h"
-#include "nisardataset.h"
-#include "nisar_priv.h"
-#include "hdf5.h"
-#include "gdal.h"        // For CE_Failure, CE_None, GDALDataType
-#include "cpl_conv.h"
 #include <algorithm>   // For std::min
 #include <vector>      // For std::vector
 #include <cstring>     // For memset
 #include <mutex>       // For std::lock_guard
 #include <iomanip>     // for std::setprecision
 #include <chrono>      // for timing instrumentation of H5Dread call
+
+#include "hdf5.h"
+#include "gdal.h"        // For CE_Failure, CE_None, GDALDataType
+#include "cpl_conv.h"
+
+#include "nisarrasterband.h"
+#include "nisardataset.h"
+#include "nisar_priv.h"
 
 /************************************************************************/
 /* ==================================================================== */

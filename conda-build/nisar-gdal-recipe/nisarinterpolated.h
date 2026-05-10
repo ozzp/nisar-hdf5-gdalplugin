@@ -2,6 +2,7 @@
 #define NISAR_INTERPOLATED_H
 
 #include <vector>
+
 #include "gdal_priv.h"
 #include "gdalwarper.h"
 #include "ogr_spatialref.h"
