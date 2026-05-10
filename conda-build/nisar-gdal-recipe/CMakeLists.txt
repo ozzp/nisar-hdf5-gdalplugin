@@ -18,6 +18,7 @@ add_library(gdal_NISAR MODULE
     nisarrasterband.cpp
     nisarinterpolated.cpp
     nisarinterpolatedrasterband.cpp
+    hdf5vfl.cpp
 )
 
 # On macOS, GDAL plugins MUST have a .dylib extension.

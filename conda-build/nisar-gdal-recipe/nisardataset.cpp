@@ -27,6 +27,7 @@
 #include "nisar_priv.h"
 #include "hdf5.h"
 #include "H5FDros3.h"  // For H5FD_ros3_fapl_t and H5FD_CURR_ROS3_FAPL_T_VERSION
+#include "hdf5vfl.h"
 
 // Helper to handle API change between 3.10 and 3.12
 static std::string NisarGetExtension(const char* pszFilename)
@@ -2433,34 +2434,44 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     // Prepare Base FAPL & Filename
     hid_t fapl_id_base = H5P_DEFAULT;
     const char *filenameForH5Fopen = pszActualFilename;
-    std::string s3_uri;
+    std::string s3_uri; // Verify if std::string or CPLString
     bool bIsS3 = false;
+    bool bIsVSIL = false;
     bool bNeedToCloseFaplBase = false;
 
     // Check for GDAL S3 path OR direct S3 URL
-    if (STARTS_WITH_CI(pszActualFilename, "/vsis3/"))
+    if (STARTS_WITH_CI(pszActualFilename, "/vsis3/") || STARTS_WITH_CI(pszActualFilename, "s3://"))
     {
         bIsS3 = true;
-        // Translate /vsis3/bucket/key to s3://bucket/key for HDF5 ROS3 VFD
-        s3_uri = "s3://";
-        s3_uri += (pszActualFilename + strlen("/vsis3/"));
-        filenameForH5Fopen = s3_uri.c_str();
-        CPLDebug("NISAR_DRIVER", "Detected /vsis3/ path, mapped to: %s", filenameForH5Fopen);
+        
+        // Translate GDAL's /vsis3/ prefix to the standard s3:// prefix expected by ROS3
+        if (STARTS_WITH_CI(pszActualFilename, "/vsis3/")) {
+            s3_uri = "s3://";
+            s3_uri += (pszActualFilename + strlen("/vsis3/"));
+            filenameForH5Fopen = s3_uri.c_str();
+            CPLDebug("NISAR_DRIVER", "Detected /vsis3/ path, mapped to ROS3 URI: %s", filenameForH5Fopen);
+        } else {
+            CPLDebug("NISAR_DRIVER", "Detected direct s3:// path: %s", filenameForH5Fopen);
+        }
     }
-    else if (STARTS_WITH_CI(pszActualFilename, "s3://"))
+    else if (STARTS_WITH_CI(pszActualFilename, "/vsicurl/") || STARTS_WITH_CI(pszActualFilename, "https://"))
     {
-        bIsS3 = true;
+        bIsVSIL = true;
         filenameForH5Fopen = pszActualFilename;
         CPLDebug("NISAR_DRIVER", "Detected direct s3:// path: %s", filenameForH5Fopen);
+        // Keep the original /vsicurl/ or https:// path. 
+        // custom VSIL bridge will hand this string directly to GDAL's VSIFOpenL.
+        filenameForH5Fopen = pszActualFilename;
+        CPLDebug("NISAR_DRIVER", "Out-of-region HTTP access detected. Using GDAL VSIL HDF5 VFD.");
     }
     else
     {
         CPLDebug("NISAR_DRIVER", "Assuming local file path, using default HDF5 FAPL.");
     }
 
-    // Configure ROS3 VFD if an S3 path was detected
     if (bIsS3)
     {
+        // Configure ROS3 VFD if an S3 path was detected
         fapl_id_base = H5Pcreate(H5P_FILE_ACCESS);
         if (fapl_id_base < 0)
         {
@@ -2475,25 +2486,46 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 
         // Check if the user explicitly requested anonymous access
         bool bNoSignRequest = CPLTestBool(CPLGetConfigOption("AWS_NO_SIGN_REQUEST", "NO"));
+        const char* pszSessionToken = ""; // Declare here for later use
 
         if (bNoSignRequest)
         {
-            CPLDebug("NISAR_DRIVER", "AWS_NO_SIGN_REQUEST=YES detected. Using anonymous ROS3 access.");
+            CPLDebug("NISAR_DRIVER", "AWS_NO_SIGN_REQUEST=YES. Using anonymous fallback.");
             ros3_fapl_conf.authenticate = FALSE;
+            ros3_fapl_conf.aws_region[0] = '\0';
+            ros3_fapl_conf.secret_id[0]  = '\0';
+            ros3_fapl_conf.secret_key[0] = '\0';
         }
         else
         {
-            CPLDebug("NISAR_DRIVER", "Using authenticated ROS3 access with standard credential chain.");
+            CPLDebug("NISAR_DRIVER", "Using authenticated ROS3 access with HDF5 2.1 API.");
+            
+            // MUST be TRUE, which strictly requires non-empty secret_id and secret_key
             ros3_fapl_conf.authenticate = TRUE;
-            strcpy(ros3_fapl_conf.aws_region, "");
-            strcpy(ros3_fapl_conf.secret_id, "");
-            strcpy(ros3_fapl_conf.secret_key, "");
 
-#if H5FD_CURR_ROS3_FAPL_T_VERSION > 1
-            strcpy(ros3_fapl_conf.session_token, "");
-#endif
+            const char* pszRegion    = CPLGetConfigOption("AWS_REGION", 
+                                            CPLGetConfigOption("AWS_DEFAULT_REGION", "us-west-2"));
+            const char* pszAccessKey = CPLGetConfigOption("AWS_ACCESS_KEY_ID", "");
+            const char* pszSecretKey = CPLGetConfigOption("AWS_SECRET_ACCESS_KEY", "");
+            pszSessionToken          = CPLGetConfigOption("AWS_SESSION_TOKEN", ""); // Save token
+
+            // Safely populate Region
+            if (strlen(pszRegion) > 0) {
+                strncpy(ros3_fapl_conf.aws_region, pszRegion, sizeof(ros3_fapl_conf.aws_region) - 1);
+                ros3_fapl_conf.aws_region[sizeof(ros3_fapl_conf.aws_region) - 1] = '\0';
+            } else {
+                ros3_fapl_conf.aws_region[0] = '\0';
+            }
+
+            // Safely populate Access/Secret Keys to pass HDF5 internal validation
+            strncpy(ros3_fapl_conf.secret_id, pszAccessKey, sizeof(ros3_fapl_conf.secret_id) - 1);
+            ros3_fapl_conf.secret_id[sizeof(ros3_fapl_conf.secret_id) - 1] = '\0';
+
+            strncpy(ros3_fapl_conf.secret_key, pszSecretKey, sizeof(ros3_fapl_conf.secret_key) - 1);
+            ros3_fapl_conf.secret_key[sizeof(ros3_fapl_conf.secret_key) - 1] = '\0';
         }
 
+        //  Apply the base ROS3 properties to the FAPL
         if (H5Pset_fapl_ros3(fapl_id_base, &ros3_fapl_conf) < 0)
         {
             CPLError(CE_Failure, CPLE_AppDefined, "H5Pset_fapl_ros3 failed.");
@@ -2502,23 +2534,63 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
             return nullptr;
         }
 
-        // Bridge GDAL's custom endpoint config to HDF5 (Useful for minIO or mock S3)
-        const char* pszEndpoint = CPLGetConfigOption("AWS_S3_ENDPOINT", nullptr);
-        if (pszEndpoint) 
+        // Inject the NASA Session Token using the new HDF5 2.X API!
+        // We do this AFTER applying the base fapl, and only if we have a token.
+        if (!bNoSignRequest && strlen(pszSessionToken) > 0)
         {
-            H5Pset_fapl_ros3_endpoint(fapl_id_base, pszEndpoint);
-            CPLDebug("NISAR_DRIVER", "Set custom ROS3 endpoint: %s", pszEndpoint);
+            if (H5Pset_fapl_ros3_token(fapl_id_base, pszSessionToken) < 0)
+            {
+                CPLError(CE_Failure, CPLE_AppDefined, "H5Pset_fapl_ros3_token failed. Token likely exceeded 4096 bytes.");
+                H5Pclose(fapl_id_base);
+                CPLFree(pszActualFilename);
+                return nullptr;
+            }
+            CPLDebug("NISAR_DRIVER", "Injected HDF5 ROS3 Session Token via 2.X API.");
+        }
+
+        // Bridge GDAL's custom endpoint config to HDF5 using the new 2.X API
+        const char* pszEndpoint = CPLGetConfigOption("AWS_S3_ENDPOINT", nullptr);
+        if (pszEndpoint)
+        {
+            if (H5Pset_fapl_ros3_endpoint(fapl_id_base, pszEndpoint) < 0) {
+                CPLDebug("NISAR_DRIVER", "Warning: Failed to set custom ROS3 endpoint.");
+            } else {
+                CPLDebug("NISAR_DRIVER", "Set custom ROS3 endpoint: %s", pszEndpoint);
+            }
         }
 
         CPLDebug("NISAR_DRIVER", "Configured HDF5 FAPL for ROS3 aws-c-s3 backend.");
+    }
+    else if (bIsVSIL)
+    {
+        // VSIL CONFIGURATION (For Out-Of-Region HTTP/Bearer access)
+        fapl_id_base = H5Pcreate(H5P_FILE_ACCESS);
+        if (fapl_id_base < 0) {
+             CPLFree(pszActualFilename);
+             return nullptr;
+        }
+        bNeedToCloseFaplBase = true;
+
+        // Route HDF5 I/O into GDAL's /vsicurl/ layer using our custom plugin namespace!
+        if (H5Pset_driver(fapl_id_base, NisarVFL::HDF5VFLGetFileDriver(), NULL) < 0)
+        {
+            CPLError(CE_Failure, CPLE_AppDefined, "Failed to configure GDAL VSIL VFD.");
+            H5Pclose(fapl_id_base);
+            CPLFree(pszActualFilename);
+            return nullptr;
+        }
+        CPLDebug("NISAR_DRIVER", "Configured HDF5 FAPL for VSIL /vsicurl/ backend.");
+    }
+    else
+    {
+        // LOCAL FILE CONFIGURATION (Default)
+        fapl_id_base = H5P_DEFAULT;
     }
 
     // ====================================================================
     // Page Buffering Configuration
     // ====================================================================
-    hsize_t nActualPageSize = NISAR_DEFAULT_PAGE_SIZE; // 4MiB
-    hid_t fapl_id_pass2 = H5P_DEFAULT;
-    bool bNeedToCloseFapl2 = false;
+    hsize_t nActualPageSize = NISAR_DEFAULT_PAGE_SIZE; // e.g., 4MiB (4194304)
 
     // Check if the user explicitly requested the "Double Open" discovery pass.
     bool bDoPageDiscovery = CPLFetchBool(poOpenInfo->papszOpenOptions, "ENABLE_PAGE_BUFFERING", false);
@@ -2531,12 +2603,13 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
 
         CPLDebug("NISAR_DRIVER", "ENABLE_PAGE_BUFFERING=YES: Attempting Pass 1 discovery on %s", filenameForH5Fopen);
 
-        // Suppress errors for this probe
+        // Suppress errors for this probe so the terminal stays clean
         H5E_auto2_t old_func;
         void *old_client_data;
         H5Eget_auto2(H5E_DEFAULT, &old_func, &old_client_data);
         H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
 
+        // Use the ALREADY CONFIGURED fapl_id_base (which has ROS3 or VSIL attached)
         hHDF5_pass1 = H5Fopen(filenameForH5Fopen, H5F_ACC_RDONLY, fapl_id_base);
         H5Eset_auto2(H5E_DEFAULT, old_func, old_client_data); // Restore error handling
 
@@ -2547,7 +2620,7 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
             {
                 if (H5Pget_file_space_page_size(fcpl_id, &nActualPageSize) < 0 || nActualPageSize == 0)
                 {
-                    CPLError(CE_Warning, CPLE_AppDefined, "File is not using Paged Allocation. Using default.");
+                    CPLDebug("NISAR_DRIVER", "File is not using Paged Allocation. Using default.");
                     nActualPageSize = NISAR_DEFAULT_PAGE_SIZE;
                 }
                 H5Pclose(fcpl_id);
@@ -2555,111 +2628,67 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
             H5Fclose(hHDF5_pass1);
             CPLDebug("NISAR_DRIVER", "Discovery Pass found page size: %lu bytes.", (unsigned long)nActualPageSize);
         }
-        else 
+        else
         {
-             CPLError(CE_Warning, CPLE_OpenFailed, "Pass 1 failed to open file. Proceeding with defaults.");
-             nActualPageSize = NISAR_DEFAULT_PAGE_SIZE;
+            CPLDebug("NISAR_DRIVER", "Pass 1 failed to open file. Proceeding with defaults.");
+            nActualPageSize = NISAR_DEFAULT_PAGE_SIZE;
         }
     }
-    else 
+    else
     {
         CPLDebug("NISAR_DRIVER", "ENABLE_PAGE_BUFFERING=NO: Skipping discovery (Fast-Path).");
     }
 
-    // PREPARE PASS 2 FAPL
-    // We must ensure S3 credentials (if any) from fapl_id_base are carried over to Pass 2.
-    if (bNeedToCloseFaplBase)
-    {
-        fapl_id_pass2 = H5Pcopy(fapl_id_base);
-        bNeedToCloseFapl2 = true;
-        
-        // We can close the base now as pass2 has the copy
-        H5Pclose(fapl_id_base);
-        bNeedToCloseFaplBase = false;
-    }
-
-    // Apply Page Buffer if we have a valid page size
+    // Apply Page Buffer settings directly to our primary FAPL
     if (nActualPageSize > 0)
     {
-        if (fapl_id_pass2 == H5P_DEFAULT)
+        // If we assumed local file and didn't create a fapl yet, create one now
+        if (fapl_id_base == H5P_DEFAULT)
         {
-            fapl_id_pass2 = H5Pcreate(H5P_FILE_ACCESS);
-            bNeedToCloseFapl2 = true;
+            fapl_id_base = H5Pcreate(H5P_FILE_ACCESS);
+            bNeedToCloseFaplBase = true;
         }
 
-        // Determine Target Buffer Size
-        size_t nTargetBufferBytes;
-        const char* pszPageBufSize = CPLGetConfigOption("H5_PAGE_BUFFER_SIZE", nullptr);
-
-        if (pszPageBufSize) 
+        // Target a 128MB cache or 32 pages, whichever is smaller, to save RAM
+        size_t nTargetBufferSize = 32 * nActualPageSize; 
+        
+        if (H5Pset_page_buffer_size(fapl_id_base, nTargetBufferSize, 0, 0) < 0)
         {
-            // User provided an override
-            nTargetBufferBytes = static_cast<size_t>(CPLAtoGIntBig(pszPageBufSize));
-        } 
-        else 
-        {
-            // Use our high-performance defaults (e.g., 32 pages * 4MiB = 128MiB)
-            nTargetBufferBytes = (size_t)nActualPageSize * NISAR_DEFAULT_PAGE_COUNT;
+            CPLDebug("NISAR_DRIVER", "Warning: Failed to set HDF5 Page Buffer Size.");
         }
-
-        // Alignment Safety Check
-        if (nTargetBufferBytes < nActualPageSize) nTargetBufferBytes = nActualPageSize;
-
-        // Calculate exact multiples to satisfy HDF5 requirements
-        unsigned int num_pages_in_buffer = (unsigned int)(nTargetBufferBytes / nActualPageSize);
-        size_t page_buffer_bytes = (size_t)num_pages_in_buffer * (size_t)nActualPageSize;
-
-        CPLDebug("NISAR_DRIVER", "Setting HDF5 page buffer: %u pages, Total=%lu bytes.",
-                  num_pages_in_buffer, (unsigned long)page_buffer_bytes);
-
-        // Encourage HDF5 library to group contiguous raw data pages together 
-        // before sending them to the ROS3 driver
-        // Set a 128 MiB buffer
-        // 20% reserved for metadata, 50% for raw data, the rest is "floating"
-        unsigned int min_meta = 20; 
-        unsigned int min_raw = 50;
-
-        if (H5Pset_page_buffer_size(fapl_id_pass2, page_buffer_bytes, min_meta, min_raw) < 0)
+        else
         {
-            CPLError(CE_Warning, CPLE_AppDefined, "Failed to set HDF5 page buffer size.");
+            CPLDebug("NISAR_DRIVER", "Setting HDF5 page buffer: %lu pages, Total=%lu bytes.", 
+                     (unsigned long)(nTargetBufferSize / nActualPageSize), 
+                     (unsigned long)nTargetBufferSize);
         }
-
-        // Set the metadata block size to match page size
-        // This prevents the library from making many tiny metadata requests
-        H5Pset_meta_block_size(fapl_id_pass2, nActualPageSize);
     }
 
-    // Pass 2: Open HDF5 file
-    hid_t hHDF5 = -1;
-    CPLDebug("NISAR_DRIVER", "Attempting H5Fopen (Pass 2) with optimized FAPL: %s",
-             filenameForH5Fopen);
- 
-    // Suppress errors for this open attempt
-    H5E_auto2_t old_func_pass2;
-    void *old_client_data_pass2;
-    H5Eget_auto2(H5E_DEFAULT, &old_func_pass2, &old_client_data_pass2);
-    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
-    hHDF5 = H5Fopen(filenameForH5Fopen, H5F_ACC_RDONLY, fapl_id_pass2);
-    H5Eset_auto2(H5E_DEFAULT, old_func_pass2, old_client_data_pass2); // Restore
- 
-    // Close FAPL for Pass 2, it's not needed after open
-    if (bNeedToCloseFapl2)
+    // ====================================================================
+    // FINAL FILE OPEN (PASS 2)
+    // ====================================================================
+    CPLDebug("NISAR_DRIVER", "Attempting H5Fopen (Pass 2) with optimized FAPL: %s", filenameForH5Fopen);
+
+    hid_t hHDF5 = H5Fopen(filenameForH5Fopen, H5F_ACC_RDONLY, fapl_id_base);
+
+    // Clean up our FAPL memory regardless of whether H5Fopen succeeded
+    if (bNeedToCloseFaplBase)
     {
-        H5Pclose(fapl_id_pass2);
-        bNeedToCloseFapl2 = false;
+        H5Pclose(fapl_id_base);
     }
- 
+
     if (hHDF5 < 0)
     {
-        CPLError(CE_Failure, CPLE_OpenFailed,
-              "H5Fopen failed (Pass 2) for '%s'.", filenameForH5Fopen);
+        CPLError(CE_Failure, CPLE_OpenFailed, "H5Fopen failed (Pass 2) for '%s'.", pszActualFilename);
         CPLFree(pszActualFilename);
         return nullptr;
     }
- 
+
     CPLDebug("NISAR_DRIVER", "H5Fopen (Pass 2) successful.");
- 
+
+    ////////////////////////////////////////////////////////////
     // Create the NisarDataset object
+    ////////////////////////////////////////////////////////////
     NisarDataset *poDS = nullptr;
     try
     {
