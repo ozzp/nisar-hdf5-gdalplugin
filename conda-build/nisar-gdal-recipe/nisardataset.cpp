@@ -2454,15 +2454,31 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
             CPLDebug("NISAR_DRIVER", "Detected direct s3:// path: %s", filenameForH5Fopen);
         }
     }
-    else if (STARTS_WITH_CI(pszActualFilename, "/vsicurl/") || STARTS_WITH_CI(pszActualFilename, "https://"))
+    else if (STARTS_WITH_CI(pszActualFilename, "/vsicurl/") || 
+             STARTS_WITH_CI(pszActualFilename, "https://") || 
+             STARTS_WITH_CI(pszActualFilename, "http://"))
     {
         bIsVSIL = true;
-        filenameForH5Fopen = pszActualFilename;
-        CPLDebug("NISAR_DRIVER", "Detected direct s3:// path: %s", filenameForH5Fopen);
-        // Keep the original /vsicurl/ or https:// path. 
-        // custom VSIL bridge will hand this string directly to GDAL's VSIFOpenL.
-        filenameForH5Fopen = pszActualFilename;
-        CPLDebug("NISAR_DRIVER", "Out-of-region HTTP access detected. Using GDAL VSIL HDF5 VFD.");
+    
+        // Use a CPLString to handle the concatenation easily
+        CPLString osVSICurlPath;
+
+        if (STARTS_WITH_CI(pszActualFilename, "/vsicurl/")) {
+            // Path is already fully qualified for GDAL VSI
+            osVSICurlPath = pszActualFilename;
+        } else {
+            // User provided a bare URL; we hide the /vsicurl/ complexity for them
+            osVSICurlPath = "/vsicurl/";
+            osVSICurlPath += pszActualFilename;
+        }
+
+        // Assign the normalized path to the H5Fopen target
+        // We store this in an persistent object (like s3_uri or a new CPLString) 
+        // to ensure the pointer stays valid until H5Fopen is called.
+        s3_uri = osVSICurlPath; 
+        filenameForH5Fopen = s3_uri.c_str();
+
+        CPLDebug("NISAR_DRIVER", "HTTP access detected. Normalized to: %s", filenameForH5Fopen);
     }
     else
     {
