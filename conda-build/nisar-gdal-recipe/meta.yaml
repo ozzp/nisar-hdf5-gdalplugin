@@ -1,5 +1,5 @@
 {% set name = "gdal-driver-nisar" %}
-{% set version = "0.4.1" %} # This is the version of NISAR PLUGIN
+{% set version = "0.5.0" %} # This is the version of NISAR PLUGIN
 
 package:
   name: {{ name|lower }}
