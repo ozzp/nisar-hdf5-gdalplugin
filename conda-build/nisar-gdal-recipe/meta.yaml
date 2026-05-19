@@ -11,12 +11,13 @@ source:
 
 build:
   number: 1
+  skip: true  # [win]  # Don't have a bld.bat for Windows
 
 requirements:
   build:
     - {{ compiler('c') }}
     - {{ compiler('cxx') }}
-    - sysroot_linux-64 2.17  # Forces compatibility with older Linux (CentOS 7+)
+    - sysroot_linux-64 2.17  # Forces compatibility with older Linux (CentOS 7+) 
     - cmake
     - make
 
@@ -40,10 +41,18 @@ test:
     - libgdal   # Metapackage that installs all standard driver plugins
 
   commands:
-    # This command will now run in the complete environment.
     - gdalinfo --formats | grep NISAR
 
 about:
-  home: # add project's home URL
-  license: # add project's license
+  home: https://github.com/ozzp/nisar-hdf5-gdalplugin
+  license: Apache-2.0
+  license_file: LICENSE
   summary: 'A GDAL plugin to read NISAR HDF5 files.'
+  description: | 
+    A high-performance C++ GDAL plugin providing ROS3/S3 streaming capabilities 
+    and block-optimized reading for NASA NISAR HDF5 products.
+  dev_url: https://github.com/ozzp/nisar-hdf5-gdalplugin
+  
+  extra:
+  recipe-maintainers:
+    - ozzp
