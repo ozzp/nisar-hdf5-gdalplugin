@@ -1,12 +1,11 @@
 {% set name = "gdal-driver-nisar" %}
-{% set version = "0.5.0" %} # This is the version of NISAR PLUGIN
+{% set version = "0.6.5" %}
 
 package:
   name: {{ name|lower }}
   version: {{ version }}
 
 source:
-  # Build from the current directory
   path: .
 
 build:
@@ -16,34 +15,44 @@ requirements:
   build:
     - {{ compiler('c') }}
     - {{ compiler('cxx') }}
-    - sysroot_linux-64 2.17  # Forces compatibility with older Linux (CentOS 7+)
+    - sysroot_linux-64 2.17  # [linux64]
+    - sysroot_linux-aarch64 2.17 # [linux_aarch64]
     - cmake
     - make
 
   host:
-    # Key dependencies to build against
+    # Key dependencies to link against (with minimum version floors)
     - gdal {{ gdal }}
     - libgdal-core {{ gdal }}
     - hdf5
+    - zlib-ng      # Inject SIMD acceleration
 
   run:
-    # Key dependencies to run with
-    # same version that was used in the 'host' section.
+    # Conda will dynamically read the exact versions used in 'host' 
+    # and automatically pin the run dependencies to match.
     - {{ pin_compatible('gdal', max_pin='x.x') }}
     - {{ pin_compatible('libgdal-core', max_pin='x.x') }}
-    # Pin HDF5 to ensure the plugin uses the same HDF5 version it was compiled with
     - {{ pin_compatible('hdf5', max_pin='x.x') }}
+    - zlib-ng
+
 test:
-  # Add this section to install a full GDAL environment for testing.
   requirements:
     - gdal      # Provides the gdalinfo command-line tool
     - libgdal   # Metapackage that installs all standard driver plugins
 
   commands:
-    # This command will now run in the complete environment.
     - gdalinfo --formats | grep NISAR
 
 about:
-  home: # add project's home URL
-  license: # add project's license
+  home: https://github.com/ozzp/nisar-hdf5-gdalplugin
+  license: Apache-2.0
+  license_file: LICENSE
   summary: 'A GDAL plugin to read NISAR HDF5 files.'
+  description: | 
+    A high-performance C++ GDAL plugin providing ROS3/S3 streaming capabilities 
+    and block-optimized reading for NASA NISAR HDF5 products.
+  dev_url: https://github.com/ozzp/nisar-hdf5-gdalplugin
+  
+  extra:
+  recipe-maintainers:
+    - ozzp
