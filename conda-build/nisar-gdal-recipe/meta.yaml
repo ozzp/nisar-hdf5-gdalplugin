@@ -10,6 +10,7 @@ source:
 
 build:
   number: 1
+  skip: true  # [win]  # Don't have a bld.bat for Windows
 
 requirements:
   build:
