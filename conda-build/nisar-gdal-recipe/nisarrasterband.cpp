@@ -794,7 +794,13 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     // -------------------------------------------------------------
     // ALIGNED PREFETCH EXPANSION (Mega-Fetch)
     // -------------------------------------------------------------
-    int nPrefetchGrid = 24; 
+
+    // Default to 1 (No prefetching) for dynamic TiTiler web serving and windowed reads.
+    // Can be overridden to 24 via environment variable for full-frame AWS Batch jobs.
+
+    int nPrefetchGrid = atoi(CPLGetConfigOption("NISAR_PREFETCH_GRID", "1"));
+    if (nPrefetchGrid < 1) nPrefetchGrid = 1;
+
     int nTotalBlocksX = (nRasterXSize + nBlockXSize - 1) / nBlockXSize;
     int nTotalBlocksY = (nRasterYSize + nBlockYSize - 1) / nBlockYSize;
 
@@ -809,7 +815,7 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     std::vector<vsi_l_offset> anOffsets;
     std::vector<size_t> anSizes;
 
-    // Scan the ALIGNED prefetch grid using the cached B-Tree vector
+    // Scan the ALIGNED prefetch grid using the cached vector
     for (int iY = nFetchYMin; iY <= nFetchYMax; iY++) {
         for (int iX = nFetchXMin; iX <= nFetchXMax; iX++) {
             
@@ -846,16 +852,28 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
         if (fp) {
             vsi_l_offset nMinOffset = anOffsets[0];
             vsi_l_offset nMaxOffset = anOffsets[0] + anSizes[0];
+            // DECLARE the accumulator variable here, initialized with the first chunk size
+            size_t nTotalRequestedBytes = anSizes[0];
             for (size_t i = 1; i < anOffsets.size(); i++) {
                 if (anOffsets[i] < nMinOffset) nMinOffset = anOffsets[i];
                 if (anOffsets[i] + anSizes[i] > nMaxOffset) nMaxOffset = anOffsets[i] + anSizes[i];
+                
+                nTotalRequestedBytes += anSizes[i];
             }
             
             size_t nTotalSpan = static_cast<size_t>(nMaxOffset - nMinOffset);
             void* pMegaBuffer = nullptr;
             std::vector<void*> apData; 
             
-            bool bIsMegaFetch = (nTotalSpan < 268435456); 
+            // Only trigger MegaFetch if the span is less than NISAR_MAX_MEGAFETCH_BYTES AND 
+            // the data we actually want makes up at least 50% of that span.
+            // This prevents downloading massive byte gaps of non-requested data.
+            // Default to 16 MB if the environment variable is not set by the user.
+            // CPLGetConfigOption returns a string, so we convert it to an integer, then cast to size_t.
+            size_t nMaxMegaFetchBytes = static_cast<size_t>(atoll(CPLGetConfigOption("NISAR_MAX_MEGAFETCH_BYTES", "16777216")));
+
+            // Evaluate using the dynamic threshold
+            bool bIsMegaFetch = (nTotalSpan < nMaxMegaFetchBytes) && (nTotalRequestedBytes > (nTotalSpan / 2));
 
             // START NETWORK TIMING
             auto net_start_time = std::chrono::high_resolution_clock::now();
@@ -866,7 +884,7 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
                 VSIFReadL(pMegaBuffer, 1, nTotalSpan, fp);
             } else {
                 apData.resize(anOffsets.size(), nullptr);
-                // FIX 1: RESTORE ACCURATE MEMORY ALLOCATION FOR MULTI-RANGE POINTERS
+                // IMPLEMENT ACCURATE MEMORY ALLOCATION FOR MULTI-RANGE POINTERS
                 for (size_t i = 0; i < anOffsets.size(); i++) {
                     apData[i] = CPLMalloc(anSizes[i]);
                 }
