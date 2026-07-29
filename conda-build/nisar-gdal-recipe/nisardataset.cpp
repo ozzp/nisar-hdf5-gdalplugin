@@ -2431,10 +2431,10 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     poDS->SetDescription(poOpenInfo->pszFilename);
     poDS->ReadIdentificationMetadata();
 
-    // EXTRACT BOUNDING POLYGON (FOOTPRINT)
+    // EXTRACT BOUNDING POLYGON (Unified Alias)
     
     // Save the current HDF5 error handler and mute it
-    H5E_auto2_t old_func_poly; 
+    H5E_auto2_t old_func_poly;
     void *old_client_data_poly;
     H5Eget_auto2(H5E_DEFAULT, &old_func_poly, &old_client_data_poly);
     H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
@@ -2448,9 +2448,8 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     // Restore the original HDF5 error handler
     H5Eset_auto2(H5E_DEFAULT, old_func_poly, old_client_data_poly);
 
-    // Attach the metadata if we successfully found it
+    // Attach the metadata to a namespace
     if (!sPolygonWkt.empty()) {
-        poDS->SetMetadataItem("FOOTPRINT", sPolygonWkt.c_str());
         poDS->SetMetadataItem("boundingPolygon", sPolygonWkt.c_str(), "NISAR_IDENTIFICATION");
     }
 
