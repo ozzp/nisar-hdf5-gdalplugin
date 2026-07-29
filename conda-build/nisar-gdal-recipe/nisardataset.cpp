@@ -2431,6 +2431,29 @@ GDALDataset *NisarDataset::Open(GDALOpenInfo *poOpenInfo)
     poDS->SetDescription(poOpenInfo->pszFilename);
     poDS->ReadIdentificationMetadata();
 
+    // EXTRACT BOUNDING POLYGON (FOOTPRINT)
+    
+    // Save the current HDF5 error handler and mute it
+    H5E_auto2_t old_func_poly; 
+    void *old_client_data_poly;
+    H5Eget_auto2(H5E_DEFAULT, &old_func_poly, &old_client_data_poly);
+    H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+
+    // Attempt to read the strings (fails silently if missing)
+    std::string sPolygonWkt = poDS->ReadHDF5StringDataset(poDS->hHDF5, "/science/LSAR/identification/boundingPolygon");
+    if (sPolygonWkt.empty()) {
+        sPolygonWkt = poDS->ReadHDF5StringDataset(poDS->hHDF5, "/science/SSAR/identification/boundingPolygon");
+    }
+
+    // Restore the original HDF5 error handler
+    H5Eset_auto2(H5E_DEFAULT, old_func_poly, old_client_data_poly);
+
+    // Attach the metadata if we successfully found it
+    if (!sPolygonWkt.empty()) {
+        poDS->SetMetadataItem("FOOTPRINT", sPolygonWkt.c_str());
+        poDS->SetMetadataItem("boundingPolygon", sPolygonWkt.c_str(), "NISAR_IDENTIFICATION");
+    }
+
     const char *pathToOpen = nullptr;
     std::string sConstructedPath;
 
