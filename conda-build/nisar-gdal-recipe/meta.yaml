@@ -1,5 +1,5 @@
 {% set name = "gdal-driver-nisar" %}
-{% set version = "0.6.5" %}
+{% set version = "0.6.6" %}
 
 package:
   name: {{ name|lower }}
@@ -9,7 +9,7 @@ source:
   path: .
 
 build:
-  number: 3
+  number: 1
   skip: true  # [win]  # Don't have a bld.bat for Windows
 
 requirements:

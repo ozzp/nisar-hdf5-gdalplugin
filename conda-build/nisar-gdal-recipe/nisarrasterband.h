@@ -13,8 +13,13 @@
 #ifndef NISAR_RASTER_BAND_H
 #define NISAR_RASTER_BAND_H
 
+#include <thread>
 #include <mutex>
 #include <cmath> // for std::isnan
+
+#include <unordered_set>
+#include <unordered_map>
+#include <thread>
 
 #include <zlib.h> //Deflate decompression
 
@@ -45,11 +50,13 @@ class NisarRasterBand final : public GDALPamRasterBand
     friend class NisarDataset;
 
     private:
-      bool m_bChunksMapped = false;
-      std::mutex m_oChunkMapMutex;
       void MapChunks();
+      std::once_flag m_oChunkMapFlag;
       std::mutex m_oMutex; // Protects shared VSI file pointers
-      std::mutex m_oMegaFetchMutex;
+      std::mutex m_oInFlightMutex;
+      std::unordered_set<int> m_oInFlightBlocks;
+      std::mutex m_oFpMutex;
+      std::unordered_map<std::thread::id, VSILFILE*> m_oFpMap;
       VSILFILE* m_fp = nullptr; // shared file pointer opened in the Dataset
       hid_t hH5Type = -1;  // Store copy of HDF5 native data type
       // Cached HDF5 handles

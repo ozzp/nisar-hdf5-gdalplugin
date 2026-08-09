@@ -253,13 +253,18 @@ NisarRasterBand::~NisarRasterBand()
     if (m_bMaskBandOwned && m_poMaskBand) {
         delete m_poMaskBand;
     }
+
+    // Clean up all thread-local network connections
+    for (auto& pair : m_oFpMap) {
+        if (pair.second) {
+            VSIFCloseL(pair.second);
+        }
+    }
+    m_oFpMap.clear();
 }
 
 void NisarRasterBand::MapChunks()
 {
-    std::lock_guard<std::mutex> lock(m_oChunkMapMutex);
-    if (m_bChunksMapped) return; // Double-checked locking
-
     CPLDebug("NISAR_DRIVER", "Lazy-mapping HDF5 chunks for Band %d...", nBand);
 
     NisarDataset *poGDS = static_cast<NisarDataset *>(this->poDS);
@@ -322,8 +327,6 @@ void NisarRasterBand::MapChunks()
         
         WriteVirtualZarrSidecar(osS3Url, osZarrGroup, m_aoAllChunks, osOutJson);
     }
-
-    m_bChunksMapped = true;
 }
 
 std::string NisarRasterBand::GetRawVSIPath() const
@@ -761,14 +764,12 @@ GDALRasterBand* NisarRasterBand::GetMaskBand()
 /***************************************************************************/
 CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
 {
-    // Ensure chunks are mapped before we calculate fetches!
-    if (!m_bChunksMapped) {
-        MapChunks();
-    }
+    // Ensure chunks are mapped exactly once in a thread-safe manner
+    std::call_once(m_oChunkMapFlag, &NisarRasterBand::MapChunks, this);
 
     // We lock to ensure the network arrays build cleanly, but we will 
     // manually drop this lock before we touch the GDAL Block Cache.
-    std::unique_lock<std::mutex> oLock(m_oMegaFetchMutex);
+    //std::unique_lock<std::mutex> oLock(m_oMegaFetchMutex);
 
     // -------------------------------------------------------------
     // ALIGNED PREFETCH EXPANSION (Mega-Fetch)
@@ -794,39 +795,83 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
     std::vector<vsi_l_offset> anOffsets;
     std::vector<size_t> anSizes;
 
-    // Scan the ALIGNED prefetch grid using the cached vector
-    for (int iY = nFetchYMin; iY <= nFetchYMax; iY++) {
-        for (int iX = nFetchXMin; iX <= nFetchXMax; iX++) {
-            
-            // Exclude already cached blocks from network fetch arrays
-            if (iX != nBlockXOff || iY != nBlockYOff) {
-                GDALRasterBlock *poBlock = TryGetLockedBlockRef(iX, iY);
-                if (poBlock != nullptr) {
-                    poBlock->DropLock();
-                    continue;
-                }
-            }
+    // Track exactly which blocks this thread reserves
+    std::vector<int> anReservedBlocks;
 
-            int idx = iY * nTotalBlocksX + iX;
-            if (idx >= 0 && idx < static_cast<int>(m_aoAllChunks.size())) {
-                const auto& chunk = m_aoAllChunks[idx];
-                if (!chunk.bIsMissing) {
-                    aoMissingChunks.push_back({iX, iY, chunk.nOffset, chunk.nLength, false});
-                    anOffsets.push_back(chunk.nOffset);
-                    anSizes.push_back(chunk.nLength);
+    // RAII Cleaner: Guarantees in-flight locks are released on ANY exit path
+    struct ScopedInFlightCleaner {
+        std::mutex& mtx;
+        std::unordered_set<int>& inFlight;
+        std::vector<int>& reserved;
+
+         ScopedInFlightCleaner(std::mutex& m, std::unordered_set<int>& i, std::vector<int>& r) 
+             : mtx(m), inFlight(i), reserved(r) {}
+
+        ~ScopedInFlightCleaner() {
+            if (reserved.empty()) return;
+            std::lock_guard<std::mutex> lock(mtx);
+            for (int idx : reserved) inFlight.erase(idx);
+        }
+    } oCleaner(m_oInFlightMutex, m_oInFlightBlocks, anReservedBlocks);
+
+    // Scan the ALIGNED prefetch grid using the cached vector
+    {
+        // Only lock while we check the cache and reserve our flight paths
+        std::lock_guard<std::mutex> lock(m_oInFlightMutex);
+
+        for (int iY = nFetchYMin; iY <= nFetchYMax; iY++) { 
+            for (int iX = nFetchXMin; iX <= nFetchXMax; iX++) {
+                int idx = iY * nTotalBlocksX + iX;
+
+                // Skip if another thread is already downloading this block
+                if (m_oInFlightBlocks.count(idx)) continue;
+
+                // Exclude already cached blocks from network fetch arrays
+                if (iX != nBlockXOff || iY != nBlockYOff) {
+                    GDALRasterBlock *poBlock = TryGetLockedBlockRef(iX, iY);
+                    if (poBlock != nullptr) {
+                        poBlock->DropLock(); 
+                        continue;
+                    }
+                }
+
+                // Reserve this block so other threads don't duplicate the download
+                m_oInFlightBlocks.insert(idx);
+                anReservedBlocks.push_back(idx);
+
+                if (idx >= 0 && idx < static_cast<int>(m_aoAllChunks.size())) {
+                    const auto& chunk = m_aoAllChunks[idx]; 
+                    if (!chunk.bIsMissing) {
+                        aoMissingChunks.push_back({iX, iY, chunk.nOffset, chunk.nLength, false});
+                        anOffsets.push_back(chunk.nOffset);
+                        anSizes.push_back(chunk.nLength);
+                    } else {
+                        aoMissingChunks.push_back({iX, iY, 0, 0, true});
+                    }
                 } else {
                     aoMissingChunks.push_back({iX, iY, 0, 0, true});
                 }
-            } else {
-                aoMissingChunks.push_back({iX, iY, 0, 0, true}); 
             }
         }
-    }
+    } // m_oInFlightMutex unlocks here. Network I/O runs completely concurrently!
 
     // Perform Concurrent Network I/O
     if (!anOffsets.empty()) {
-        std::string sRawPath = GetRawVSIPath();
-        VSILFILE* fp = VSIFOpenL(sRawPath.c_str(), "rb");
+        VSILFILE* fp = nullptr;
+
+        // Fetch or create a dedicated network connection for this specific thread
+        {
+            std::lock_guard<std::mutex> fpLock(m_oFpMutex);
+            auto tid = std::this_thread::get_id();
+            auto it = m_oFpMap.find(tid);
+            
+            if (it != m_oFpMap.end()) {
+                fp = it->second;
+            } else {
+                fp = VSIFOpenL(GetRawVSIPath().c_str(), "rb");
+                if (fp) m_oFpMap[tid] = fp;
+            }
+        }
         
         if (fp) {
             vsi_l_offset nMinOffset = anOffsets[0];
@@ -869,10 +914,6 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
                 }
                 VSIFReadMultiRangeL(static_cast<int>(anOffsets.size()), apData.data(), anOffsets.data(), anSizes.data(), fp);
             }
-            VSIFCloseL(fp);
-
-            // Relinquish network lock early to free up standard I/O concurrency
-            oLock.unlock();
 
             // STOP NETWORK TIMING
             auto net_end_time = std::chrono::high_resolution_clock::now();
@@ -984,14 +1025,15 @@ CPLErr NisarRasterBand::IReadBlock(int nBlockXOff, int nBlockYOff, void *pImage)
                     }
                 }
             }
+             // Clean up original download memory allocations safely
+             if (bIsMegaFetch) {
+                 CPLFree(pMegaBuffer);
+             } else {
+                 for (void* p : apData) {
+                     if (p) CPLFree(p);
+                 }
+             }
 
-            // Clean up original download memory allocations safely
-            if (bIsMegaFetch) {
-                CPLFree(pMegaBuffer);
-            } else {
-                for (void* p : apData) if (p) CPLFree(p);
-            }
-            
             return bSuccess ? CE_None : CE_Failure;
         }
     }
