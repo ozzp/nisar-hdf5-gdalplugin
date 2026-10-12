@@ -1,3 +1,38 @@
+/*
+ * Copyright 2025, California Institute of Technology.
+ * All rights reserved. U.S. Government sponsorship acknowledged.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* The HDF5 Virtual File Layer below is derived from GDAL's frmts/hdf5/hdf5vfl.h
+ * and remains under its original MIT license: */
+/******************************************************************************
+ *
+ * Project:  Hierarchical Data Format Release 5 (HDF5)
+ * Authors:  Denis Nadeau <denis.nadeau@gmail.com>
+ * Sam Gillingham <gillingham.sam@gmail.com>
+ *
+ ******************************************************************************
+ * Copyright (c) 2008-2018, Even Rouault <even.rouault at spatialys.com>
+ * Copyright 2025 California Institute of Technology (NISAR adaptation).
+ * U.S. Government sponsorship acknowledged.
+ *
+ * SPDX-License-Identifier: MIT
+ ****************************************************************************/
+
 // hdf5vfl.cpp
 #include "hdf5vfl.h"
 #include "cpl_port.h"
@@ -5,9 +40,10 @@
 
 #include <algorithm>
 #include <mutex>
-#include <cstring> // For memset
+#include <cstring>  // For memset
 
-namespace NisarVFL {
+namespace NisarVFL
+{
 
 static std::mutex gMutex;
 static hid_t hFileDriver = -1;
@@ -136,61 +172,61 @@ static herr_t HDF5_vsil_truncate(H5FD_t *_file, hid_t /* dxpl_id*/,
     return 0;
 }
 
-
 // --------------------------------------------------------------------------
 // HDF5 2.1.0 Compatible Class Struct
 // Exactly 40 fields to match H5FDdevelop.h
 // --------------------------------------------------------------------------
 static const H5FD_class_t HDF5_vsil_g = {
-    H5FD_CLASS_VERSION,              /* 1: version */
-    static_cast<H5FD_class_value_t>(513), /* 2: value (Reserved GDAL VSIL value) */
-    "vsil",                          /* 3: name */
-    MAXADDR,                         /* 4: maxaddr */
-    H5F_CLOSE_WEAK,                  /* 5: fc_degree */
-    nullptr,                         /* 6: terminate */
-    nullptr,                         /* 7: sb_size */
-    nullptr,                         /* 8: sb_encode */
-    nullptr,                         /* 9: sb_decode */
-    0,                               /* 10: fapl_size */
-    nullptr,                         /* 11: fapl_get */
-    nullptr,                         /* 12: fapl_copy */
-    nullptr,                         /* 13: fapl_free */
-    0,                               /* 14: dxpl_size */
-    nullptr,                         /* 15: dxpl_copy */
-    nullptr,                         /* 16: dxpl_free */
-    HDF5_vsil_open,                  /* 17: open */
-    HDF5_vsil_close,                 /* 18: close */
-    nullptr,                         /* 19: cmp */
-    HDF5_vsil_query,                 /* 20: query */
-    nullptr,                         /* 21: get_type_map */
-    nullptr,                         /* 22: alloc */
-    nullptr,                         /* 23: free */
-    HDF5_vsil_get_eoa,               /* 24: get_eoa */
-    HDF5_vsil_set_eoa,               /* 25: set_eoa */
-    HDF5_vsil_get_eof,               /* 26: get_eof */
-    nullptr,                         /* 27: get_handle */
-    HDF5_vsil_read,                  /* 28: read */
-    HDF5_vsil_write,                 /* 29: write */
-    nullptr,                         /* 30: read_vector */
-    nullptr,                         /* 31: write_vector */
-    nullptr,                         /* 32: read_selection */
-    nullptr,                         /* 33: write_selection */
-    nullptr,                         /* 34: flush */
-    HDF5_vsil_truncate,              /* 35: truncate */
-    nullptr,                         /* 36: lock */
-    nullptr,                         /* 37: unlock */
-    nullptr,                         /* 38: del */
-    nullptr,                         /* 39: ctl */
-    {                                /* 40: fl_map (H5FD_FLMAP_DICHOTOMY mapped out) */
-        H5FD_MEM_SUPER,   /* default */
-        H5FD_MEM_SUPER,   /* super */
-        H5FD_MEM_SUPER,   /* btree */
-        H5FD_MEM_DRAW,    /* draw */
-        H5FD_MEM_DRAW,    /* gheap */
-        H5FD_MEM_SUPER,   /* lheap */
-        H5FD_MEM_SUPER    /* ohdr */
-    }
-};
+    H5FD_CLASS_VERSION, /* 1: version */
+    static_cast<H5FD_class_value_t>(
+        513),           /* 2: value (Reserved GDAL VSIL value) */
+    "vsil",             /* 3: name */
+    MAXADDR,            /* 4: maxaddr */
+    H5F_CLOSE_WEAK,     /* 5: fc_degree */
+    nullptr,            /* 6: terminate */
+    nullptr,            /* 7: sb_size */
+    nullptr,            /* 8: sb_encode */
+    nullptr,            /* 9: sb_decode */
+    0,                  /* 10: fapl_size */
+    nullptr,            /* 11: fapl_get */
+    nullptr,            /* 12: fapl_copy */
+    nullptr,            /* 13: fapl_free */
+    0,                  /* 14: dxpl_size */
+    nullptr,            /* 15: dxpl_copy */
+    nullptr,            /* 16: dxpl_free */
+    HDF5_vsil_open,     /* 17: open */
+    HDF5_vsil_close,    /* 18: close */
+    nullptr,            /* 19: cmp */
+    HDF5_vsil_query,    /* 20: query */
+    nullptr,            /* 21: get_type_map */
+    nullptr,            /* 22: alloc */
+    nullptr,            /* 23: free */
+    HDF5_vsil_get_eoa,  /* 24: get_eoa */
+    HDF5_vsil_set_eoa,  /* 25: set_eoa */
+    HDF5_vsil_get_eof,  /* 26: get_eof */
+    nullptr,            /* 27: get_handle */
+    HDF5_vsil_read,     /* 28: read */
+    HDF5_vsil_write,    /* 29: write */
+    nullptr,            /* 30: read_vector */
+    nullptr,            /* 31: write_vector */
+    nullptr,            /* 32: read_selection */
+    nullptr,            /* 33: write_selection */
+    nullptr,            /* 34: flush */
+    HDF5_vsil_truncate, /* 35: truncate */
+    nullptr,            /* 36: lock */
+    nullptr,            /* 37: unlock */
+    nullptr,            /* 38: del */
+    nullptr,            /* 39: ctl */
+    {
+        /* 40: fl_map (H5FD_FLMAP_DICHOTOMY mapped out) */
+        H5FD_MEM_SUPER, /* default */
+        H5FD_MEM_SUPER, /* super */
+        H5FD_MEM_SUPER, /* btree */
+        H5FD_MEM_DRAW,  /* draw */
+        H5FD_MEM_DRAW,  /* gheap */
+        H5FD_MEM_SUPER, /* lheap */
+        H5FD_MEM_SUPER  /* ohdr */
+    }};
 
 // --------------------------------------------------------------------------
 // Public API implementations exposed via hdf5vfl.h
@@ -222,4 +258,4 @@ void HDF5VFLUnloadFileDriver()
     }
 }
 
-} // namespace NisarVFL
+}  // namespace NisarVFL

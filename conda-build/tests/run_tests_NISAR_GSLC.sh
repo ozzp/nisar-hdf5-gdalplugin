@@ -10,7 +10,8 @@ CONDA_ENV_NAME="nisar-gslc-test-suite"
 
 # Subdatasets and output file names for GSLC product
 SUBDATASET_NETCDF="science/LSAR/GSLC/grids/frequencyA/HH"
-SUBDATASET_NISAR="//${SUBDATASET_NETCDF}" # Use HDF5 driver convention
+SUBDATASET_NISAR="/${SUBDATASET_NETCDF}"  # NISAR driver: absolute HDF5 path, single leading slash
+SUBDATASET_HDF5="//${SUBDATASET_NETCDF}"  # Stock HDF5 driver convention
 OUTPUT_COG_NISAR="output_nisar_driver.tif"
 OUTPUT_REPROJECT_TIF="output_gslc_reproject.tif"
 OUTPUT_AMPLITUDE_TIF="output_amplitude.tif"
@@ -159,6 +160,7 @@ SECONDS_WINDOW=$(echo "$TIME_WINDOW_READ" | sed 's/m/ /' | sed 's/s//' | awk '{p
 
 TIME_DELTA=$(echo "$SECONDS_FULL - $SECONDS_WINDOW" | bc -l)
 echo -e " - ${GREEN}Performance Result${NC}: The partial windowed read was ${TIME_DELTA} seconds faster than the full data read."
+rm -f "$FULL_READ_OUTPUT" "$WINDOW_OUTPUT"
 
 # Test 2.4: Reprojecting a subdataset with gdalwarp
 echo "  - Test 2.4: Reprojecting a subdataset with gdalwarp... "
@@ -202,10 +204,11 @@ echo "  - NOTE: Running derived subdataset tests on local file due to GDAL S3 sy
 echo -n "  - Test 2.6: Creating derived AMPLITUDE subdataset... "
 rm -f "$OUTPUT_AMPLITUDE_TIF"
 # Use the confirmed working HDF5 syntax with quotes around the filename
-LOCAL_AMPLITUDE_INPUT="DERIVED_SUBDATASET:AMPLITUDE:HDF5:\"${LOCAL_HDF5_FILE}\":${SUBDATASET_NISAR}"
+LOCAL_AMPLITUDE_INPUT="DERIVED_SUBDATASET:AMPLITUDE:HDF5:\"${LOCAL_HDF5_FILE}\":${SUBDATASET_HDF5}"
 gdal_translate -q -of GTiff "$LOCAL_AMPLITUDE_INPUT" "$OUTPUT_AMPLITUDE_TIF"
 if [ -s "$OUTPUT_AMPLITUDE_TIF" ]; then
     echo -e "${GREEN}PASSED${NC}"
+    rm -f "$OUTPUT_AMPLITUDE_TIF"
 else
     echo -e "${RED}FAILED${NC}"
     exit 1
@@ -215,10 +218,11 @@ fi
 echo -n "  - Test 2.7: Creating derived PHASE subdataset... "
 rm -f "$OUTPUT_PHASE_TIF"
 # Use the confirmed working HDF5 syntax with quotes around the filename
-LOCAL_PHASE_INPUT="DERIVED_SUBDATASET:PHASE:HDF5:\"${LOCAL_HDF5_FILE}\":${SUBDATASET_NISAR}"
+LOCAL_PHASE_INPUT="DERIVED_SUBDATASET:PHASE:HDF5:\"${LOCAL_HDF5_FILE}\":${SUBDATASET_HDF5}"
 gdal_translate -q -of GTiff "$LOCAL_PHASE_INPUT" "$OUTPUT_PHASE_TIF"
 if [ -s "$OUTPUT_PHASE_TIF" ]; then
     echo -e "${GREEN}PASSED${NC}"
+    rm -f "$OUTPUT_PHASE_TIF"
 else
     echo -e "${RED}FAILED${NC}"
     exit 1
@@ -238,6 +242,7 @@ gdal_translate -q $COG_OPTIONS "NISAR:${GDAL_S3_PATH}:${SUBDATASET_NISAR}" "$OUT
 
 if [ -s "$OUTPUT_COG_GSLC" ]; then
     echo -e "    ${GREEN}PASSED${NC}"
+    rm -f "$OUTPUT_COG_GSLC"
 else
     echo -e "    ${RED}FAILED${NC}"
     exit 1
@@ -257,6 +262,7 @@ gdal_translate -q $TILED_OPTIONS "NISAR:${GDAL_S3_PATH}:${SUBDATASET_NISAR}" "$O
 
 if [ -s "$OUTPUT_TILED_TIF" ]; then
     echo -e "    ${GREEN}PASSED${NC}"
+    rm -f "$OUTPUT_TILED_TIF"
 else
     echo -e "    ${RED}FAILED${NC}"
     exit 1
@@ -308,7 +314,7 @@ fi
 
 # Test 3.3.1: Time standard HDF5 driver from Local File
 echo "  - Test 3.3.1: Timing standard HDF5 driver (from Local File)... "
-HDF5_LOCAL_PATH="HDF5:\"${LOCAL_HDF5_FILE}\"://${SUBDATASET_NETCDF}"
+HDF5_LOCAL_PATH="HDF5:\"${LOCAL_HDF5_FILE}\":${SUBDATASET_HDF5}"
 if TIME_OUTPUT=$( { time GDAL_SKIP=NISAR gdal_translate -q -of COG "${HDF5_LOCAL_PATH}" "output_hdf5_driver.tif" 2> /dev/null; } 2>&1 ); then
     REAL_TIME=$(echo "$TIME_OUTPUT" | grep real | awk '{print $2}')
     echo -e "    ${GREEN}PASSED: Finished in ${REAL_TIME}${NC}"

@@ -29,9 +29,9 @@ These datasets provide the reference information for the full-resolution radar i
   * **/science/LSAR/\<product\_type\>/swaths/frequencyA/\`**
       * **`slantRange`** (Dataset): A 1D array of slant range values for every pixel in the range direction. The **first value** of this array is used as the `startingRange` of the image.
       * **`slantRangeSpacing`** (Dataset): The distance in meters between each pixel in the range direction.
-      * **`nominalAcquisitionPRF`** (Dataset): The Pulse Repetition Frequency (PRF) of the acquisition, used to convert azimuth time to image line numbers.
-  * **/science/LSAR/identification/**
-      * **`zeroDopplerStartTime`** (Dataset): The absolute UTC start time of the entire scene. This is the time reference for line `0` of the image.
+  * **/science/LSAR/\<product\_type\>/swaths/**
+      * **`zeroDopplerTime`** (Dataset): A 1D array of azimuth times for every image line, with a `units` epoch attribute. The **first value** is the time reference for line `0` of the image.
+      * **`zeroDopplerTimeSpacing`** (Dataset): The time in seconds between consecutive image lines. (This is *not* `1 / nominalAcquisitionPRF`: the focused image is resampled to a coarser azimuth posting than the raw pulse rate.)
 
 ## The GCP Calculation Process
 
@@ -40,11 +40,9 @@ For each point in the `azimuth_times` and `slant_ranges` grid arrays, the driver
 1.  **Get Geographic Coordinate**: It retrieves the longitude and latitude from the `coordinateX` and `coordinateY` cubes. These become the `(X, Y)` of the GCP.
 2.  **Calculate Pixel Coordinate**: It calculates the image pixel coordinate using the slant range values.
       * $GCP_{Pixel} = ((gridSlantRange - startingRange) / rangePixelSpacing) + 0.5$
-3.  **Calculate Line Coordinate**: It calculates the image line coordinate by converting all time values to a common reference (Unix time).
-      * First, the epoch from the `units` attribute is converted to a Unix timestamp (`time_epoch`).
-      * The `scene_start_time` is also converted to a Unix timestamp.
-      * $GCP_{UnixTime} = timeEpoch + gridAzimuthTime$
-      * $GCP_{Line} = ((GCP_{UnixTime} - sceneStartTime) \times PRF) + 0.5$
+3.  **Calculate Line Coordinate**: It calculates the image line coordinate from the swath azimuth axis, as specified for the product.
+      * The `units` epochs of the grid `zeroDopplerTime` and the swath `zeroDopplerTime` are parsed; the swath start time `swaths/zeroDopplerTime[0]` is expressed in the grid epoch (`swathStartTime`).
+      * $GCP_{Line} = ((gridAzimuthTime - swathStartTime) / zeroDopplerTimeSpacing) + 0.5$
 4.  **Set GCPs**: The final list of `(Pixel, Line) -> (Lon, Lat)` points is attached to the GDAL dataset, along with the EPSG code.
 
 ## Examples
